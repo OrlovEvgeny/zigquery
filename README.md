@@ -243,5 +243,4 @@ zig build test
 Inspired by Go's [goquery](https://github.com/PuerkitoBio/goquery) and, by extension, jQuery
 
 ## License
-
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)
