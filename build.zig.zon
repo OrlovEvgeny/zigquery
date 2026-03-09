@@ -1,0 +1,12 @@
+.{
+    .name = .zigquery,
+    .version = "0.1.0",
+    .fingerprint = 0xb1f22613cdce64cf,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+    },
+}
