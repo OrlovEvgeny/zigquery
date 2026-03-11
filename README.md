@@ -1,5 +1,9 @@
 # zigquery
 
+[![CI](https://github.com/OrlovEvgeny/zigquery/actions/workflows/ci.yml/badge.svg)](https://github.com/OrlovEvgeny/zigquery/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/OrlovEvgeny/zigquery)](https://github.com/OrlovEvgeny/zigquery/releases/latest)
+[![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig)](https://ziglang.org/)
+
 jQuery-like HTML DOM manipulation library for Zig. Parse HTML, query elements with CSS selectors, traverse the tree, and manipulate the document
 ## Quick start
 

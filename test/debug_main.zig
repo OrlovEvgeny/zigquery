@@ -5,22 +5,22 @@ pub fn main() !void {
     const alloc = std.heap.page_allocator;
     var doc = try zq.Document.initFromSlice(alloc, "<div><p>Hello</p><p>World</p></div>");
     defer doc.deinit();
-    
+
     printTree(doc.root_node, 0);
-    
+
     std.debug.print("\n--- find p ---\n", .{});
     const ps = try doc.find("p");
     std.debug.print("ps: {}\n", .{ps.len()});
-    
+
     std.debug.print("\n--- find div ---\n", .{});
     const divs = try doc.find("div");
     std.debug.print("divs: {}\n", .{divs.len()});
-    
+
     if (divs.len() > 0) {
         const ch = divs.children();
         std.debug.print("div children: {}\n", .{ch.len()});
     }
-    
+
     std.debug.print("\n--- find html ---\n", .{});
     var doc3 = try zq.Document.initFromSlice(alloc, "<!DOCTYPE html><html lang=\"en\"><body><p>X</p></body></html>");
     const htmls = try doc3.find("html");

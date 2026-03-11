@@ -20,8 +20,6 @@ pub const Selection = struct {
     document: *Document,
     prev_sel: ?*const Selection = null,
 
-
-
     pub fn initSingle(node: *Node, doc: *Document) Selection {
         const nodes_buf = doc.allocator().alloc(*Node, 1) catch return .{
             .nodes = &.{},
@@ -1041,8 +1039,6 @@ pub const Selection = struct {
         }
     }
 
-
-
     /// Add nodes matching CSS selector to this selection.
     pub fn add(self: Selection, selector: []const u8) !Selection {
         const alloc = self.document.allocator();
@@ -1111,8 +1107,6 @@ pub const Selection = struct {
     }
 };
 
-
-
 /// Render the outer HTML of the first element.
 pub fn outerHtml(sel: Selection) ![]const u8 {
     if (sel.nodes.len == 0) return "";
@@ -1130,8 +1124,6 @@ pub fn nodeName(sel: Selection) []const u8 {
         .document => "#document",
     };
 }
-
-
 
 fn findWithMatcher(alloc: Allocator, nodes: []*Node, m: Matcher) ![]*Node {
     var result: std.ArrayList(*Node) = .empty;

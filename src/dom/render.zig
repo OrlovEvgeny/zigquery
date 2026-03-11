@@ -4,15 +4,15 @@ const Node = node_mod.Node;
 const NodeType = node_mod.NodeType;
 
 const void_elements = std.StaticStringMap(void).initComptime(.{
-    .{ "area", {} },  .{ "base", {} },   .{ "br", {} },
-    .{ "col", {} },   .{ "embed", {} },  .{ "hr", {} },
-    .{ "img", {} },   .{ "input", {} },  .{ "link", {} },
-    .{ "meta", {} },  .{ "param", {} },  .{ "source", {} },
+    .{ "area", {} },  .{ "base", {} },  .{ "br", {} },
+    .{ "col", {} },   .{ "embed", {} }, .{ "hr", {} },
+    .{ "img", {} },   .{ "input", {} }, .{ "link", {} },
+    .{ "meta", {} },  .{ "param", {} }, .{ "source", {} },
     .{ "track", {} }, .{ "wbr", {} },
 });
 
 const raw_text_elements = std.StaticStringMap(void).initComptime(.{
-    .{ "script", {} }, .{ "style", {} },
+    .{ "script", {} },   .{ "style", {} },
     .{ "textarea", {} }, .{ "title", {} },
 });
 

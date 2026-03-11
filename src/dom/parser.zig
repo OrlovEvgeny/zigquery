@@ -13,16 +13,16 @@ pub const HtmlParseError = error{
 
 // Void elements that must not have children.
 const void_elements = std.StaticStringMap(void).initComptime(.{
-    .{ "area", {} },    .{ "base", {} },   .{ "br", {} },
-    .{ "col", {} },     .{ "embed", {} },  .{ "hr", {} },
-    .{ "img", {} },     .{ "input", {} },  .{ "link", {} },
-    .{ "meta", {} },    .{ "param", {} },  .{ "source", {} },
-    .{ "track", {} },   .{ "wbr", {} },
+    .{ "area", {} },  .{ "base", {} },  .{ "br", {} },
+    .{ "col", {} },   .{ "embed", {} }, .{ "hr", {} },
+    .{ "img", {} },   .{ "input", {} }, .{ "link", {} },
+    .{ "meta", {} },  .{ "param", {} }, .{ "source", {} },
+    .{ "track", {} }, .{ "wbr", {} },
 });
 
 // Raw text elements where content is not parsed as HTML.
 const raw_text_elements = std.StaticStringMap(void).initComptime(.{
-    .{ "script", {} }, .{ "style", {} },
+    .{ "script", {} },   .{ "style", {} },
     .{ "textarea", {} }, .{ "title", {} },
     .{ "xmp", {} },
 });
@@ -34,55 +34,52 @@ const p_only = &[_][]const u8{"p"};
 
 const auto_close_map = std.StaticStringMap([]const []const u8).initComptime(.{
     // Block-level elements close an open <p>.
-    .{ "address", p_only },     .{ "article", p_only },
-    .{ "aside", p_only },       .{ "blockquote", p_only },
-    .{ "details", p_only },     .{ "div", p_only },
-    .{ "dl", p_only },          .{ "fieldset", p_only },
-    .{ "figcaption", p_only },  .{ "figure", p_only },
-    .{ "footer", p_only },      .{ "form", p_only },
-    .{ "h1", p_only },          .{ "h2", p_only },
-    .{ "h3", p_only },          .{ "h4", p_only },
-    .{ "h5", p_only },          .{ "h6", p_only },
-    .{ "header", p_only },      .{ "hgroup", p_only },
-    .{ "hr", p_only },          .{ "main", p_only },
-    .{ "menu", p_only },        .{ "nav", p_only },
-    .{ "ol", p_only },          .{ "p", p_only },
-    .{ "pre", p_only },         .{ "section", p_only },
-    .{ "table", p_only },       .{ "ul", p_only },
+    .{ "address", p_only },                    .{ "article", p_only },
+    .{ "aside", p_only },                      .{ "blockquote", p_only },
+    .{ "details", p_only },                    .{ "div", p_only },
+    .{ "dl", p_only },                         .{ "fieldset", p_only },
+    .{ "figcaption", p_only },                 .{ "figure", p_only },
+    .{ "footer", p_only },                     .{ "form", p_only },
+    .{ "h1", p_only },                         .{ "h2", p_only },
+    .{ "h3", p_only },                         .{ "h4", p_only },
+    .{ "h5", p_only },                         .{ "h6", p_only },
+    .{ "header", p_only },                     .{ "hgroup", p_only },
+    .{ "hr", p_only },                         .{ "main", p_only },
+    .{ "menu", p_only },                       .{ "nav", p_only },
+    .{ "ol", p_only },                         .{ "p", p_only },
+    .{ "pre", p_only },                        .{ "section", p_only },
+    .{ "table", p_only },                      .{ "ul", p_only },
     // Definition list items.
-    .{ "dd", &.{ "dd", "dt" } },
-    .{ "dt", &.{ "dd", "dt" } },
+    .{ "dd", &.{ "dd", "dt" } },               .{ "dt", &.{ "dd", "dt" } },
     // List items.
-    .{ "li", &.{ "li" } },
+    .{ "li", &.{"li"} },
     // Option groups.
-    .{ "optgroup", &.{ "optgroup" } },
+                          .{ "optgroup", &.{"optgroup"} },
     .{ "option", &.{ "option", "optgroup" } },
     // Table sections.
     .{ "thead", &.{ "tbody", "tfoot" } },
-    .{ "tbody", &.{ "tbody", "tfoot" } },
-    .{ "tfoot", &.{ "tbody" } },
-    .{ "tr", &.{ "tr" } },
-    .{ "td", &.{ "td", "th" } },
+    .{ "tbody", &.{ "tbody", "tfoot" } },      .{ "tfoot", &.{"tbody"} },
+    .{ "tr", &.{"tr"} },                       .{ "td", &.{ "td", "th" } },
     .{ "th", &.{ "td", "th" } },
     // Ruby.
-    .{ "rt", &.{ "rt", "rp" } },
+                  .{ "rt", &.{ "rt", "rp" } },
     .{ "rp", &.{ "rt", "rp" } },
 });
 
 // Formatting elements for adoption agency.
 const formatting_elements = std.StaticStringMap(void).initComptime(.{
-    .{ "a", {} },      .{ "b", {} },      .{ "big", {} },
-    .{ "code", {} },   .{ "em", {} },     .{ "font", {} },
-    .{ "i", {} },      .{ "nobr", {} },   .{ "s", {} },
-    .{ "small", {} },  .{ "strike", {} }, .{ "strong", {} },
-    .{ "tt", {} },     .{ "u", {} },
+    .{ "a", {} },     .{ "b", {} },      .{ "big", {} },
+    .{ "code", {} },  .{ "em", {} },     .{ "font", {} },
+    .{ "i", {} },     .{ "nobr", {} },   .{ "s", {} },
+    .{ "small", {} }, .{ "strike", {} }, .{ "strong", {} },
+    .{ "tt", {} },    .{ "u", {} },
 });
 
 // Scope boundary elements.
 const scope_elements = std.StaticStringMap(void).initComptime(.{
     .{ "applet", {} },  .{ "caption", {} }, .{ "html", {} },
-    .{ "table", {} },   .{ "td", {} },     .{ "th", {} },
-    .{ "marquee", {} }, .{ "object", {} }, .{ "template", {} },
+    .{ "table", {} },   .{ "td", {} },      .{ "th", {} },
+    .{ "marquee", {} }, .{ "object", {} },  .{ "template", {} },
 });
 
 /// Parse an HTML string into a DOM tree. Returns the document root node.
