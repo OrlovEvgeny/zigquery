@@ -58,15 +58,10 @@ fn collectMatches(selector: *const Selector, node: *const Node, result: *std.Arr
 
 /// Core matching logic: does `selector` match `node`?
 pub fn matchNode(selector: *const Selector, node: *const Node) bool {
-    if (node.node_type != .element) {
-        return switch (selector.*) {
-            .universal => true,
-            else => false,
-        };
-    }
+    if (node.node_type != .element) return false;
 
     return switch (selector.*) {
-        .tag => |tag| std.mem.eql(u8, node.data, tag),
+        .tag => |tag| std.ascii.eqlIgnoreCase(node.data, tag),
         .id => |id| blk: {
             const node_id = node.getAttr("id") orelse break :blk false;
             break :blk std.mem.eql(u8, node_id, id);
@@ -90,6 +85,7 @@ pub fn matchNode(selector: *const Selector, node: *const Node) bool {
         },
         .not => |inner| !matchNode(inner, node),
         .has_pseudo => |inner| matchHas(node, inner),
+        .relative => false,
         .contains => |text| matchContains(node, text),
     };
 }
@@ -109,7 +105,7 @@ fn hasClass(node: *const Node, cls: []const u8) bool {
 
 fn matchAttr(node: *const Node, attr_sel: sel_mod.AttrSelector) bool {
     for (node.attr) |attr| {
-        if (!std.mem.eql(u8, attr.key, attr_sel.key)) continue;
+        if (!std.ascii.eqlIgnoreCase(attr.key, attr_sel.key)) continue;
 
         return switch (attr_sel.op) {
             .exists => true,
@@ -129,14 +125,17 @@ fn matchAttr(node: *const Node, attr_sel: sel_mod.AttrSelector) bool {
                 break :blk false;
             },
             .prefix => blk: {
+                if (attr_sel.val.len == 0) break :blk false;
                 if (attr.val.len < attr_sel.val.len) break :blk false;
                 break :blk eqlMaybeCI(attr.val[0..attr_sel.val.len], attr_sel.val, attr_sel.case_insensitive);
             },
             .suffix => blk: {
+                if (attr_sel.val.len == 0) break :blk false;
                 if (attr.val.len < attr_sel.val.len) break :blk false;
                 break :blk eqlMaybeCI(attr.val[attr.val.len - attr_sel.val.len ..], attr_sel.val, attr_sel.case_insensitive);
             },
             .substring => blk: {
+                if (attr_sel.val.len == 0) break :blk false;
                 if (attr_sel.case_insensitive) {
                     // Brute force case-insensitive substring.
                     if (attr.val.len < attr_sel.val.len) break :blk false;
@@ -172,9 +171,10 @@ fn matchPseudoClass(node: *const Node, pc: sel_mod.PseudoClassSelector) bool {
         .nth_last_child => isNthChild(node, pc.a, pc.b, true),
         .nth_of_type => isNthOfType(node, pc.a, pc.b, false),
         .nth_last_of_type => isNthOfType(node, pc.a, pc.b, true),
-        .enabled => !matchAttrVal(node, "disabled", ""),
-        .disabled => matchAttrVal(node, "disabled", "") or node.getAttr("disabled") != null,
-        .checked => node.getAttr("checked") != null or node.getAttr("selected") != null,
+        .enabled => isDisableable(node) and node.getAttr("disabled") == null,
+        .disabled => isDisableable(node) and node.getAttr("disabled") != null,
+        .checked => (std.mem.eql(u8, node.data, "input") and node.getAttr("checked") != null) or
+            (std.mem.eql(u8, node.data, "option") and node.getAttr("selected") != null),
     };
 }
 
@@ -247,8 +247,12 @@ fn nodeIsEmpty(node: *const Node) bool {
     return true;
 }
 
-fn matchAttrVal(node: *const Node, key: []const u8, _: []const u8) bool {
-    return node.getAttr(key) != null;
+fn isDisableable(node: *const Node) bool {
+    const disableable = [_][]const u8{ "button", "fieldset", "input", "optgroup", "option", "select", "textarea" };
+    for (disableable) |name| {
+        if (std.mem.eql(u8, node.data, name)) return true;
+    }
+    return false;
 }
 
 fn matchCombinator(node: *const Node, comb: sel_mod.Combinator) bool {
@@ -288,15 +292,98 @@ fn matchCombinator(node: *const Node, comb: sel_mod.Combinator) bool {
 }
 
 fn matchHas(node: *const Node, inner: *const Selector) bool {
-    var child = node.first_child;
-    while (child) |c| {
-        if (c.node_type == .element) {
-            if (matchNode(inner, c)) return true;
-            if (matchHas(c, inner)) return true;
-        }
-        child = c.next_sibling;
+    return switch (inner.*) {
+        .group => |parts| blk: {
+            for (parts) |part| {
+                if (matchHas(node, part)) break :blk true;
+            }
+            break :blk false;
+        },
+        .relative => |relative| matchRelative(node, relative),
+        else => matchRelative(node, .{ .kind = .descendant, .selector = inner }),
+    };
+}
+
+fn matchRelative(node: *const Node, relative: sel_mod.RelativeSelector) bool {
+    var root = node;
+    while (root.parent) |parent| root = parent;
+    return anyRelativeCandidate(node, relative.kind, relative.selector, root);
+}
+
+fn anyRelativeCandidate(anchor: *const Node, leading: CombinatorKind, selector: *const Selector, root: *const Node) bool {
+    if (root.node_type == .element and matchRelativeCandidate(anchor, leading, selector, root)) return true;
+    var child = root.first_child;
+    while (child) |current| : (child = current.next_sibling) {
+        if (anyRelativeCandidate(anchor, leading, selector, current)) return true;
     }
     return false;
+}
+
+fn matchRelativeCandidate(anchor: *const Node, leading: CombinatorKind, selector: *const Selector, candidate: *const Node) bool {
+    if (candidate.node_type != .element) return false;
+    return switch (selector.*) {
+        .combinator => |comb| blk: {
+            if (!matchNode(comb.right, candidate)) break :blk false;
+            break :blk switch (comb.kind) {
+                .descendant => descendant: {
+                    var parent = candidate.parent;
+                    while (parent) |current| : (parent = current.parent) {
+                        if (matchRelativeCandidate(anchor, leading, comb.left, current)) break :descendant true;
+                    }
+                    break :descendant false;
+                },
+                .child => if (candidate.parent) |parent|
+                    matchRelativeCandidate(anchor, leading, comb.left, parent)
+                else
+                    false,
+                .next_sibling => previous: {
+                    var sibling = candidate.prev_sibling;
+                    while (sibling) |current| : (sibling = current.prev_sibling) {
+                        if (current.node_type == .element) {
+                            break :previous matchRelativeCandidate(anchor, leading, comb.left, current);
+                        }
+                    }
+                    break :previous false;
+                },
+                .subsequent_sibling => previous: {
+                    var sibling = candidate.prev_sibling;
+                    while (sibling) |current| : (sibling = current.prev_sibling) {
+                        if (current.node_type == .element and
+                            matchRelativeCandidate(anchor, leading, comb.left, current)) break :previous true;
+                    }
+                    break :previous false;
+                },
+            };
+        },
+        else => matchesLeadingRelation(anchor, candidate, leading) and matchNode(selector, candidate),
+    };
+}
+
+fn matchesLeadingRelation(anchor: *const Node, candidate: *const Node, leading: CombinatorKind) bool {
+    return switch (leading) {
+        .descendant => blk: {
+            var parent = candidate.parent;
+            while (parent) |current| : (parent = current.parent) {
+                if (current == anchor) break :blk true;
+            }
+            break :blk false;
+        },
+        .child => candidate.parent == anchor,
+        .next_sibling => blk: {
+            var sibling = candidate.prev_sibling;
+            while (sibling) |current| : (sibling = current.prev_sibling) {
+                if (current.node_type == .element) break :blk current == anchor;
+            }
+            break :blk false;
+        },
+        .subsequent_sibling => blk: {
+            var sibling = candidate.prev_sibling;
+            while (sibling) |current| : (sibling = current.prev_sibling) {
+                if (current.node_type == .element and current == anchor) break :blk true;
+            }
+            break :blk false;
+        },
+    };
 }
 
 fn matchContains(node: *const Node, text: []const u8) bool {

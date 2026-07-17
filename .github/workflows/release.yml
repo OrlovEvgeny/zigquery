@@ -17,9 +17,15 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
 
       - name: Determine tag
         id: tag
@@ -30,10 +36,23 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Validate version and package
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.version }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag: $RELEASE_TAG" >&2; exit 1; }
+          ZON_VERSION=$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
+          test "${RELEASE_TAG#v}" = "$ZON_VERSION"
+          zig fmt --check src/ test/
+          zig build
+          zig build test
+
       - name: Get previous tag
         id: prev_tag
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.version }}
         run: |
-          PREV=$(git tag --sort=-version:refname | grep '^v' | sed -n '2p')
+          PREV=$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" --match 'v*' 2>/dev/null || true)
           if [ -z "$PREV" ]; then
             echo "ref=$(git rev-list --max-parents=0 HEAD)" >> "$GITHUB_OUTPUT"
           else
@@ -47,7 +66,7 @@ jobs:
             echo 'body<<CHANGELOG_EOF'
             echo "## What's Changed"
             echo ""
-            git log ${{ steps.prev_tag.outputs.ref }}..${{ github.sha }} \
+            git log ${{ steps.prev_tag.outputs.ref }}..${{ steps.tag.outputs.version }} \
               --pretty=format:"- %s (%h)" --no-merges
             echo ""
             echo ""
@@ -56,7 +75,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.2
         with:
           tag_name: ${{ steps.tag.outputs.version }}
           name: ${{ steps.tag.outputs.version }}

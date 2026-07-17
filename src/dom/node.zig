@@ -28,7 +28,7 @@ pub const Node = struct {
     /// Attribute lookup by key. Returns the value if found.
     pub fn getAttr(self: *const Node, key: []const u8) ?[]const u8 {
         for (self.attr) |a| {
-            if (std.mem.eql(u8, a.key, key)) return a.val;
+            if (std.ascii.eqlIgnoreCase(a.key, key)) return a.val;
         }
         return null;
     }
@@ -36,7 +36,7 @@ pub const Node = struct {
     /// Attribute lookup including namespace.
     pub fn getAttrNs(self: *const Node, namespace: []const u8, key: []const u8) ?[]const u8 {
         for (self.attr) |a| {
-            if (std.mem.eql(u8, a.key, key) and std.mem.eql(u8, a.namespace, namespace)) return a.val;
+            if (std.ascii.eqlIgnoreCase(a.key, key) and std.mem.eql(u8, a.namespace, namespace)) return a.val;
         }
         return null;
     }

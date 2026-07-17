@@ -31,8 +31,8 @@ test "is" {
     var doc = try helper.parseDoc("<div class=\"active\"><p>test</p></div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    try std.testing.expect(div.is(".active"));
-    try std.testing.expect(!div.is(".inactive"));
+    try std.testing.expect(try div.is(".active"));
+    try std.testing.expect(!try div.is(".inactive"));
 }
 
 test "filter on page2.html" {
@@ -54,7 +54,7 @@ test "intersection" {
     defer doc.deinit();
     const ps = try doc.find("p");
     const a = try doc.find(".a");
-    const inter = ps.intersection(a);
+    const inter = try ps.intersection(a);
     try std.testing.expect(inter.len() == 1);
 }
 
@@ -62,7 +62,7 @@ test "end returns previous" {
     var doc = try helper.parseDoc("<div><p>A</p><span>B</span></div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    const children = div.children();
+    const children = try div.children();
     const filtered = try children.filter("p");
     try std.testing.expect(filtered.len() == 1);
     const back = filtered.end();

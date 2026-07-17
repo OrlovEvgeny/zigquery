@@ -23,6 +23,9 @@ pub const Selector = union(enum) {
     /// :has() pseudo-class.
     has_pseudo: *const Selector,
 
+    /// A selector evaluated relative to the element matched by :has().
+    relative: RelativeSelector,
+
     /// :contains("text") pseudo-class.
     contains: []const u8,
 };
@@ -55,6 +58,11 @@ pub const Combinator = struct {
     kind: CombinatorKind,
     left: *const Selector,
     right: *const Selector,
+};
+
+pub const RelativeSelector = struct {
+    kind: CombinatorKind,
+    selector: *const Selector,
 };
 
 pub const PseudoClassKind = enum {

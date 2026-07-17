@@ -2,6 +2,21 @@ const std = @import("std");
 const zq = @import("zigquery");
 const helper = @import("test_helper.zig");
 
+fn setAttrWithFailures(allocator: std.mem.Allocator) !void {
+    var doc = try zq.Document.initFromSlice(allocator, "<div id=first></div><div id=second></div>");
+    defer doc.deinit();
+    const divs = try doc.find("div");
+
+    divs.setAttr("id", "updated") catch |err| {
+        try std.testing.expectEqualStrings("first", divs.nodes[0].getAttr("id").?);
+        try std.testing.expectEqualStrings("second", divs.nodes[1].getAttr("id").?);
+        return err;
+    };
+
+    try std.testing.expectEqualStrings("updated", divs.nodes[0].getAttr("id").?);
+    try std.testing.expectEqualStrings("updated", divs.nodes[1].getAttr("id").?);
+}
+
 test "attr" {
     var doc = try helper.parseDoc("<a href=\"/test\" id=\"link1\">click</a>");
     defer doc.deinit();
@@ -22,7 +37,7 @@ test "setAttr" {
     var doc = try helper.parseDoc("<div id=\"original\">test</div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    div.setAttr("id", "modified");
+    try div.setAttr("id", "modified");
     try std.testing.expectEqualStrings("modified", div.attr("id").?);
 }
 
@@ -30,8 +45,35 @@ test "setAttr new attribute" {
     var doc = try helper.parseDoc("<div>test</div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    div.setAttr("data-x", "value");
+    try div.setAttr("data-x", "value");
     try std.testing.expectEqualStrings("value", div.attr("data-x").?);
+}
+
+test "setAttr owns caller buffers" {
+    var doc = try helper.parseDoc("<div></div>");
+    defer doc.deinit();
+    const div = try doc.find("div");
+
+    const name = try std.testing.allocator.dupe(u8, "data-owned");
+    const value = try std.testing.allocator.dupe(u8, "yes");
+    try div.setAttr(name, value);
+    std.testing.allocator.free(name);
+    std.testing.allocator.free(value);
+
+    try std.testing.expectEqualStrings("yes", div.attr("data-owned").?);
+}
+
+test "setAttr is atomic on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, setAttrWithFailures, .{});
+}
+
+test "removeClass removes duplicate class tokens" {
+    var doc = try helper.parseDoc("<div class='foo foo bar'></div>");
+    defer doc.deinit();
+    const div = try doc.find("div");
+
+    try div.removeClass("foo");
+    try std.testing.expectEqualStrings("bar", div.attr("class").?);
 }
 
 test "removeAttr" {
@@ -57,7 +99,7 @@ test "addClass" {
     var doc = try helper.parseDoc("<div class=\"foo\">test</div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    div.addClass("bar");
+    try div.addClass("bar");
     try std.testing.expect(div.hasClass("foo"));
     try std.testing.expect(div.hasClass("bar"));
 }
@@ -66,7 +108,7 @@ test "addClass does not duplicate" {
     var doc = try helper.parseDoc("<div class=\"foo\">test</div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    div.addClass("foo");
+    try div.addClass("foo");
     const class_val = div.attr("class").?;
     // Should not have "foo" twice.
     var count: usize = 0;
@@ -81,7 +123,7 @@ test "removeClass" {
     var doc = try helper.parseDoc("<div class=\"foo bar baz\">test</div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    div.removeClass("bar");
+    try div.removeClass("bar");
     try std.testing.expect(div.hasClass("foo"));
     try std.testing.expect(!div.hasClass("bar"));
     try std.testing.expect(div.hasClass("baz"));
@@ -91,7 +133,7 @@ test "removeClass all" {
     var doc = try helper.parseDoc("<div class=\"foo bar\">test</div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    div.removeClass("");
+    try div.removeClass("");
     try std.testing.expect(div.attr("class") == null);
 }
 
@@ -99,9 +141,9 @@ test "toggleClass" {
     var doc = try helper.parseDoc("<div class=\"foo\">test</div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    div.toggleClass("foo");
+    try div.toggleClass("foo");
     try std.testing.expect(!div.hasClass("foo"));
-    div.toggleClass("foo");
+    try div.toggleClass("foo");
     try std.testing.expect(div.hasClass("foo"));
 }
 

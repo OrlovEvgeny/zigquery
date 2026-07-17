@@ -27,6 +27,8 @@ pub fn build(b: *std.Build) void {
         "test/filter_test.zig",
         "test/property_test.zig",
         "test/manipulation_test.zig",
+        "test/compiled_selector_test.zig",
+        "test/api_test.zig",
     };
 
     // Run inline tests from the library module itself.

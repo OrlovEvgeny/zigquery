@@ -5,6 +5,7 @@ const NodeType = @import("dom/node.zig").NodeType;
 const html_parser = @import("dom/parser.zig");
 const tree = @import("dom/tree.zig");
 const Selection = @import("selection.zig").Selection;
+const CompiledSelector = @import("css/compiled.zig").CompiledSelector;
 
 pub const Document = struct {
     arena: std.heap.ArenaAllocator,
@@ -20,10 +21,20 @@ pub const Document = struct {
         return .{ .arena = arena, .root_node = root };
     }
 
-    /// Construct a Document that wraps an existing root node.
-    /// The caller is responsible for the node's lifetime matching
-    /// the backing allocator.
-    pub fn initFromNode(backing: Allocator, root: *Node) Document {
+    /// Construct an owning Document by deep-cloning an existing root node.
+    pub fn initFromNode(backing: Allocator, root: *const Node) !Document {
+        var arena = std.heap.ArenaAllocator.init(backing);
+        errdefer arena.deinit();
+        const cloned_root = try tree.cloneNode(arena.allocator(), root);
+        return .{
+            .arena = arena,
+            .root_node = cloned_root,
+        };
+    }
+
+    /// Wrap a borrowed root node. The caller must keep the complete source tree
+    /// alive until this Document is deinitialized.
+    pub fn initBorrowedNode(backing: Allocator, root: *Node) Document {
         return .{
             .arena = std.heap.ArenaAllocator.init(backing),
             .root_node = root,
@@ -38,8 +49,13 @@ pub const Document = struct {
         return .{
             .arena = arena,
             .root_node = cloned_root,
-            .url = self.url,
+            .url = if (self.url) |url| try arena.allocator().dupe(u8, url) else null,
         };
+    }
+
+    /// Store a document URL in the document arena.
+    pub fn setUrl(self: *Document, url: []const u8) !void {
+        self.url = try self.allocator().dupe(u8, url);
     }
 
     /// Release all memory owned by this document.
@@ -48,18 +64,23 @@ pub const Document = struct {
     }
 
     /// Root selection spanning the document's root node.
-    pub fn select(self: *Document) Selection {
+    pub fn select(self: *Document) !Selection {
         return Selection.initSingle(self.root_node, self);
     }
 
     /// Convenience: parse a CSS selector and return matching elements.
     pub fn find(self: *Document, selector: []const u8) !Selection {
-        return self.select().find(selector);
+        return (try self.select()).find(selector);
     }
 
     /// Convenience: find using a pre-compiled matcher.
-    pub fn findMatcher(self: *Document, m: anytype) Selection {
-        return self.select().findMatcher(m);
+    pub fn findMatcher(self: *Document, m: @import("css/matcher.zig").Matcher) !Selection {
+        return (try self.select()).findMatcher(m);
+    }
+
+    /// Convenience: find using a reusable compiled selector.
+    pub fn findCompiled(self: *Document, compiled: *const CompiledSelector) !Selection {
+        return (try self.select()).findCompiled(compiled);
     }
 
     /// Arena allocator for this document. Selections allocate node slices here.

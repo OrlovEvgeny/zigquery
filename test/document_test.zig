@@ -24,6 +24,29 @@ test "Document.clone" {
     try std.testing.expect(sel.len() == 1);
 }
 
+test "Document owns input and clone strings" {
+    const input = try std.testing.allocator.dupe(u8, "<div data-value=\"original\">text</div>");
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, input);
+    std.testing.allocator.free(input);
+    defer doc.deinit();
+
+    var cloned = try doc.clone(std.testing.allocator);
+    defer cloned.deinit();
+
+    const div = try cloned.find("div");
+    try std.testing.expectEqualStrings("original", div.attr("data-value").?);
+    try std.testing.expectEqualStrings("text", try div.text());
+}
+
+test "Document.initFromNode creates an owning clone" {
+    var source = zq.Node{ .node_type = .element, .data = "div" };
+    var doc = try zq.Document.initFromNode(std.testing.allocator, &source);
+    defer doc.deinit();
+
+    try std.testing.expect(doc.root_node != &source);
+    try std.testing.expectEqualStrings("div", doc.root_node.data);
+}
+
 test "Document from page.html" {
     var doc = try zq.Document.initFromSlice(std.testing.allocator, helper.page_html);
     defer doc.deinit();
@@ -45,7 +68,7 @@ test "Document from page2.html" {
     const main_div = try doc.find("#main");
     try std.testing.expect(main_div.len() == 1);
 
-    const children = main_div.children();
+    const children = try main_div.children();
     try std.testing.expect(children.len() == 6);
 }
 

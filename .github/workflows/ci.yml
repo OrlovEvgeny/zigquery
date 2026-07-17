@@ -6,16 +6,23 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Check formatting
         run: zig fmt --check src/ test/
@@ -25,18 +32,45 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            zig: 0.15.2
+          - os: ubuntu-latest
+            zig: 0.16.0
+          - os: windows-latest
+            zig: 0.15.2
+          - os: windows-latest
+            zig: 0.16.0
+          - os: macos-latest
+            zig: 0.16.0
+    name: test (${{ matrix.os }}, Zig ${{ matrix.zig }})
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.0
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.15.2
+          version: ${{ matrix.zig }}
 
       - name: Build
         run: zig build
 
       - name: Test
         run: zig build test
+
+  macos-zig-0-15:
+    needs: lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.15.2
+
+      # Zig 0.15.2 cannot link on current macOS runners. Compile the library
+      # tests without emitting a binary to keep source compatibility covered.
+      - name: Semantic compatibility check
+        run: zig test src/root.zig -fno-emit-bin

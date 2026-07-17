@@ -101,3 +101,52 @@ test "invalid selector returns error" {
     const result = zq.css_parser.parseSelector(arena.allocator(), "");
     try std.testing.expectError(error.UnexpectedToken, result);
 }
+
+test "relative has selectors" {
+    var doc = try zq.Document.initFromSlice(
+        std.testing.allocator,
+        "<section><p>child</p></section><section><div><p>nested</p></div></section><dt id=first></dt><dt></dt>",
+    );
+    defer doc.deinit();
+
+    try std.testing.expect((try doc.find("section:has(> p)")).len() == 1);
+    try std.testing.expect((try doc.find("section:has(p)")).len() == 2);
+    try std.testing.expect((try doc.find("dt:has(+ dt)")).len() == 1);
+}
+
+test "relative has anchors complex selector chains" {
+    var doc = try zq.Document.initFromSlice(
+        std.testing.allocator,
+        "<div id=a><p><span></span></p></div><div id=b><section><span></span></section></div>" ++
+            "<h1></h1><section><a></a></section>",
+    );
+    defer doc.deinit();
+
+    try std.testing.expect((try doc.find("div:has(> p > span)")).len() == 1);
+    try std.testing.expect((try doc.find("h1:has(+ section > a)")).len() == 1);
+    try std.testing.expect((try doc.find("#b:has(> p > span)")).len() == 0);
+}
+
+test "selector lists in logical pseudo classes" {
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, "<h1>A</h1><h2>B</h2><p>C</p>");
+    defer doc.deinit();
+
+    try std.testing.expect((try doc.find(":is(h1, h2)")).len() == 2);
+    try std.testing.expect((try doc.find("*:not(h1, h2)")).len() >= 1);
+}
+
+test "HTML selector names are ASCII case insensitive" {
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, "<DIV DATA-X=value>ok</DIV>");
+    defer doc.deinit();
+
+    try std.testing.expect((try doc.find("DIV[DATA-X=value]")).len() == 1);
+}
+
+test "universal selector only matches elements" {
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, "<div>text<span></span></div>");
+    defer doc.deinit();
+    const contents = try (try doc.find("div")).contents();
+    const elements = try contents.filter("*");
+    try std.testing.expect(elements.len() == 1);
+    try std.testing.expectEqualStrings("span", elements.nodes[0].data);
+}

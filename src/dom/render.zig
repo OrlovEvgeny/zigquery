@@ -12,17 +12,12 @@ const void_elements = std.StaticStringMap(void).initComptime(.{
 });
 
 const raw_text_elements = std.StaticStringMap(void).initComptime(.{
-    .{ "script", {} },   .{ "style", {} },
-    .{ "textarea", {} }, .{ "title", {} },
+    .{ "script", {} }, .{ "style", {} }, .{ "xmp", {} },
 });
 
-pub const RenderError = error{
-    OutOfMemory,
-    WriteFailed,
-};
-
-/// Render a node and all descendants as HTML to the given writer.
-pub fn render(writer: std.io.AnyWriter, node: *const Node) anyerror!void {
+/// Render a node and all descendants as HTML. The writer must provide
+/// `writeAll([]const u8)` and `writeByte(u8)` methods returning error unions.
+pub fn render(writer: anytype, node: *const Node) anyerror!void {
     switch (node.node_type) {
         .document => {
             try renderChildren(writer, node);
@@ -77,7 +72,7 @@ pub fn render(writer: std.io.AnyWriter, node: *const Node) anyerror!void {
 }
 
 /// Render only the children of a node (inner HTML).
-pub fn renderChildren(writer: std.io.AnyWriter, node: *const Node) anyerror!void {
+pub fn renderChildren(writer: anytype, node: *const Node) anyerror!void {
     var child = node.first_child;
     while (child) |c| {
         try render(writer, c);
@@ -89,7 +84,8 @@ pub fn renderChildren(writer: std.io.AnyWriter, node: *const Node) anyerror!void
 pub fn renderToString(allocator: std.mem.Allocator, node: *const Node) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try render(buf.writer(allocator).any(), node);
+    var writer = ArrayListWriter{ .list = &buf, .allocator = allocator };
+    try render(&writer, node);
     return buf.toOwnedSlice(allocator);
 }
 
@@ -97,11 +93,12 @@ pub fn renderToString(allocator: std.mem.Allocator, node: *const Node) ![]const 
 pub fn renderChildrenToString(allocator: std.mem.Allocator, node: *const Node) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try renderChildren(buf.writer(allocator).any(), node);
+    var writer = ArrayListWriter{ .list = &buf, .allocator = allocator };
+    try renderChildren(&writer, node);
     return buf.toOwnedSlice(allocator);
 }
 
-fn writeEscapedText(writer: std.io.AnyWriter, text: []const u8) anyerror!void {
+fn writeEscapedText(writer: anytype, text: []const u8) anyerror!void {
     for (text) |c| {
         switch (c) {
             '&' => try writer.writeAll("&amp;"),
@@ -112,7 +109,7 @@ fn writeEscapedText(writer: std.io.AnyWriter, text: []const u8) anyerror!void {
     }
 }
 
-fn writeEscapedAttr(writer: std.io.AnyWriter, text: []const u8) anyerror!void {
+fn writeEscapedAttr(writer: anytype, text: []const u8) anyerror!void {
     for (text) |c| {
         switch (c) {
             '&' => try writer.writeAll("&amp;"),
@@ -126,9 +123,23 @@ fn writeEscapedAttr(writer: std.io.AnyWriter, text: []const u8) anyerror!void {
 pub fn escapeString(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try writeEscapedText(buf.writer(allocator).any(), text);
+    var writer = ArrayListWriter{ .list = &buf, .allocator = allocator };
+    try writeEscapedText(&writer, text);
     return buf.toOwnedSlice(allocator);
 }
+
+const ArrayListWriter = struct {
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    fn writeAll(self: *ArrayListWriter, bytes: []const u8) !void {
+        try self.list.appendSlice(self.allocator, bytes);
+    }
+
+    fn writeByte(self: *ArrayListWriter, byte: u8) !void {
+        try self.list.append(self.allocator, byte);
+    }
+};
 
 test "render element" {
     const tree_m = @import("tree.zig");
@@ -141,7 +152,8 @@ test "render element" {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try render(buf.writer(std.testing.allocator).any(), &parent);
+    var writer = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try render(&writer, &parent);
     try std.testing.expectEqualStrings("<div id=\"main\">hello</div>", buf.items);
 }
 
@@ -149,7 +161,8 @@ test "render void element" {
     var node = Node{ .node_type = .element, .data = "br", .attr = @constCast(&[_]node_mod.Attribute{}) };
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try render(buf.writer(std.testing.allocator).any(), &node);
+    var writer = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try render(&writer, &node);
     try std.testing.expectEqualStrings("<br>", buf.items);
 }
 
@@ -157,6 +170,7 @@ test "render escaping" {
     var node = Node{ .node_type = .text, .data = "a < b & c > d" };
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try render(buf.writer(std.testing.allocator).any(), &node);
+    var writer = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try render(&writer, &node);
     try std.testing.expectEqualStrings("a &lt; b &amp; c &gt; d", buf.items);
 }

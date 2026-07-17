@@ -28,8 +28,14 @@ pub const html_render = @import("dom/render.zig");
 pub const Selector = @import("css/selector.zig").Selector;
 pub const css_parser = @import("css/parser.zig");
 pub const Matcher = @import("css/matcher.zig").Matcher;
+pub const CompiledSelector = @import("css/compiled.zig").CompiledSelector;
 pub const CssParseError = @import("css/parser.zig").CssParseError;
 
 test {
-    @import("std").testing.refAllDeclsRecursive(@This());
+    const testing = @import("std").testing;
+    if (@hasDecl(testing, "refAllDeclsRecursive")) {
+        testing.refAllDeclsRecursive(@This());
+    } else {
+        testing.refAllDecls(@This());
+    }
 }

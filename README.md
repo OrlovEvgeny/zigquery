@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/OrlovEvgeny/zigquery/actions/workflows/ci.yml/badge.svg)](https://github.com/OrlovEvgeny/zigquery/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/OrlovEvgeny/zigquery)](https://github.com/OrlovEvgeny/zigquery/releases/latest)
-[![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d?logo=zig)](https://ziglang.org/)
+[![Zig](https://img.shields.io/badge/Zig-0.15.2%20%7C%200.16.0-f7a41d?logo=zig)](https://ziglang.org/)
 
-jQuery-like HTML DOM manipulation library for Zig. Parse HTML, query elements with CSS selectors, traverse the tree, and manipulate the document
+jQuery-like HTML DOM manipulation library for Zig. Parse HTML, query elements with CSS selectors, traverse the tree, and manipulate the document.
 ## Quick start
 
 ```zig
@@ -64,7 +64,7 @@ const zigquery = b.dependency("zigquery", .{
 module.addImport("zigquery", zigquery.module("zigquery"));
 ```
 
-Requires **Zig 0.15.2** or later.
+Supported Zig versions: **0.15.2** and **0.16.x**.
 
 ## CSS selectors
 
@@ -84,6 +84,7 @@ Supported selector syntax:
 | General sibling | `h1 ~ p` | Any sibling after |
 | Group | `h1, h2, h3` | Match any in the list |
 | Negation | `:not(.hidden)` | Exclude matches |
+| Logical lists | `:is(h1, h2)`, `:where(.note)` | Match any selector in a list |
 | `:has()` | `div:has(> p)` | Parent has matching descendant |
 | `:contains()` | `p:contains("hello")` | Element contains text |
 | `:first-child`, `:last-child`, `:only-child` | `li:first-child` | Structural pseudo-classes |
@@ -119,22 +120,20 @@ const sel = try doc.find("div");
 const links = try sel.find("a");
 
 // Direct children.
-const kids = sel.children();
+const kids = try sel.children();
 const filtered_kids = try sel.childrenFiltered("p");
 
 // Parents.
-const p = sel.parent();
-const all_parents = sel.parents();
-const until = sel.parentsUntil(.{ .selector = "body" });
+const p = try sel.parent();
+const all_parents = try sel.parents();
 
 // Closest ancestor (or self) matching a selector.
 const wrapper = try sel.closest(".wrapper");
 
 // Siblings.
-const sibs = sel.siblings();
-const next_el = sel.next();
-const prev_all = sel.prevAll();
-const next_until = sel.nextUntil(.{ .selector = "hr" });
+const sibs = try sel.siblings();
+const next_el = try sel.next();
+const prev_all = try sel.prevAll();
 ```
 
 ### Selection — Filtering
@@ -146,14 +145,14 @@ const active = try items.filter(".active");
 const inactive = try items.not(".active");
 const with_links = try items.has("a");
 
-const first = items.first();
-const last = items.last();
-const third = items.eq(2);        // zero-based
-const from_end = items.eq(-1);    // negative indexes from end
-const middle = items.sliceRange(1, 3);
+const first = try items.first();
+const last = try items.last();
+const third = try items.eq(2);        // zero-based
+const from_end = try items.eq(-1);    // negative indexes from end
+const middle = try items.sliceRange(1, 3);
 
 // Boolean checks.
-const is_active = items.is(".active");
+const is_active = try items.is(".active");
 ```
 
 ### Selection — Properties
@@ -164,13 +163,13 @@ const el = try doc.find("a.nav");
 // Attributes.
 const href = el.attr("href");
 const title = el.attrOr("title", "default");
-el.setAttr("target", "_blank");
+try el.setAttr("target", "_blank");
 el.removeAttr("rel");
 
 // Classes.
-el.addClass("highlight bold");
-el.removeClass("nav");
-el.toggleClass("active");
+try el.addClass("highlight bold");
+try el.removeClass("nav");
+try el.toggleClass("active");
 const has = el.hasClass("highlight");
 
 // Content.
@@ -186,26 +185,26 @@ const name = zq.nodeName(el);
 const div = try doc.find("div");
 
 // Insert content.
-div.appendHtml("<p>appended</p>");
-div.prependHtml("<p>prepended</p>");
+try div.appendHtml("<p>appended</p>");
+try div.prependHtml("<p>prepended</p>");
 
 // Insert around selection.
 const p = try doc.find("p");
-p.afterHtml("<hr/>");
-p.beforeHtml("<!-- marker -->");
+try p.afterHtml("<hr/>");
+try p.beforeHtml("<!-- marker -->");
 
 // Replace and remove.
-_ = p.replaceWithHtml("<div>replaced</div>");
+_ = try p.replaceWithHtml("<div>replaced</div>");
 _ = p.remove();
-_ = div.empty();   // remove all children
+_ = try div.empty();   // remove all children
 
 // Set content.
-div.setHtml("<b>new content</b>");
-div.setText("plain text");
+try div.setHtml("<b>new content</b>");
+try div.setText("plain text");
 
 // Wrap / unwrap.
-div.wrapHtml("<section></section>");
-div.unwrap();
+try div.wrapHtml("<section></section>");
+try div.unwrap();
 ```
 
 ### Selection — Iteration
@@ -236,10 +235,49 @@ const a = try doc.find(".foo");
 const b = try doc.find(".bar");
 
 const combined = try a.add(".bar");
-const merged = a.addSelection(b);
-const union_sel = a.@"union"(b);
-const common = a.intersection(b);
+const merged = try a.addSelection(b);
+const union_sel = try a.@"union"(b);
+const common = try a.intersection(b);
 ```
+
+### Compiled selectors
+
+Compile a selector once when it is reused across queries or documents:
+
+```zig
+var active_links = try zq.CompiledSelector.init(allocator, "a.active");
+defer active_links.deinit();
+
+const links = try doc.findCompiled(&active_links);
+const matches = links.isCompiled(&active_links);
+```
+
+## Ownership and errors
+
+`Document.initFromSlice`, `Document.initFromNode`, `Document.clone`, parsed fragments,
+attributes, and inserted nodes own their data through the document arena. Input buffers
+and source documents may be released after these operations complete. Use
+`Document.initBorrowedNode` only when the source tree is guaranteed to outlive the
+document.
+
+Operations that allocate return an error union. In v0.2 this includes traversal methods
+such as `children`, positional methods such as `first`, attribute/class updates, and DOM
+mutations. Mutations parse or clone all required data before changing the tree, so an
+allocation failure does not leave a partially updated selection.
+
+## v0.2 migration
+
+Add `try` to allocating `Selection` calls. Node insertion now deep-clones supplied nodes
+for every destination and never detaches the caller's source nodes. Invalid selector
+syntax is returned as an error by `Selection.is` instead of being treated as no match.
+
+## Parser scope
+
+The parser is intentionally lenient and covers common HTML document and fragment use,
+including implicit `html/head/body`, raw text/RCDATA, optional closing for common list
+and table elements, comments, and core character references. It is not yet a complete
+WHATWG tree builder; foreign content, templates, the adoption agency algorithm, and the
+full named entity table remain roadmap items. See [ROADMAP.md](ROADMAP.md).
 
 ## Running tests
 

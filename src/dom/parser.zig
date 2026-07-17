@@ -22,9 +22,12 @@ const void_elements = std.StaticStringMap(void).initComptime(.{
 
 // Raw text elements where content is not parsed as HTML.
 const raw_text_elements = std.StaticStringMap(void).initComptime(.{
-    .{ "script", {} },   .{ "style", {} },
-    .{ "textarea", {} }, .{ "title", {} },
+    .{ "script", {} }, .{ "style", {} },
     .{ "xmp", {} },
+});
+
+const rcdata_elements = std.StaticStringMap(void).initComptime(.{
+    .{ "textarea", {} }, .{ "title", {} },
 });
 
 // Map from tag being opened → tags that should be auto-closed on the stack.
@@ -85,14 +88,16 @@ const scope_elements = std.StaticStringMap(void).initComptime(.{
 /// Parse an HTML string into a DOM tree. Returns the document root node.
 /// All nodes are allocated in `allocator` (expected to be an arena).
 pub fn parse(allocator: Allocator, input: []const u8) HtmlParseError!*Node {
-    var parser = Parser.init(allocator, input);
+    const owned_input = allocator.dupe(u8, input) catch return HtmlParseError.OutOfMemory;
+    var parser = Parser.init(allocator, owned_input);
     return parser.run();
 }
 
 /// Parse an HTML fragment in the context of a given parent element.
 /// Returns a slice of top-level nodes.
 pub fn parseFragment(allocator: Allocator, input: []const u8, context: *const Node) HtmlParseError![]*Node {
-    var parser = Parser.init(allocator, input);
+    const owned_input = allocator.dupe(u8, input) catch return HtmlParseError.OutOfMemory;
+    var parser = Parser.init(allocator, owned_input);
     parser.fragment_context = context;
     const doc = try parser.run();
 
@@ -140,6 +145,8 @@ const Parser = struct {
     fragment_context: ?*const Node,
     head_inserted: bool,
     body_inserted: bool,
+    head_node: ?*Node,
+    body_node: ?*Node,
 
     fn init(allocator: Allocator, input: []const u8) Parser {
         return .{
@@ -151,6 +158,8 @@ const Parser = struct {
             .fragment_context = null,
             .head_inserted = false,
             .body_inserted = false,
+            .head_node = null,
+            .body_node = null,
         };
     }
 
@@ -208,7 +217,14 @@ const Parser = struct {
             self.skipWhitespace();
             if (self.pos >= self.input.len or self.input[self.pos] == '>' or self.input[self.pos] == '/') break;
             const attr = try self.parseAttribute();
-            try attrs.append(self.allocator, attr);
+            var duplicate = false;
+            for (attrs.items) |existing| {
+                if (std.ascii.eqlIgnoreCase(existing.key, attr.key)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) try attrs.append(self.allocator, attr);
             self.skipWhitespace();
         }
 
@@ -241,20 +257,33 @@ const Parser = struct {
                 return;
             }
         }
-        if (std.mem.eql(u8, tag_name, "body") and self.body_inserted) {
-            // Body already exists, find it and merge attributes.
-            for (self.open_elements.items) |el| {
-                if (el.node_type == .element and std.mem.eql(u8, el.data, "body")) {
-                    if (el.attr.len == 0 and attrs.items.len > 0) {
-                        el.attr = try attrs.toOwnedSlice(self.allocator);
-                    }
-                    return;
+        if (std.mem.eql(u8, tag_name, "head")) {
+            if (self.head_node) |head| {
+                if (head.attr.len == 0 and attrs.items.len > 0) {
+                    head.attr = try attrs.toOwnedSlice(self.allocator);
                 }
+                return;
+            }
+        }
+        if (std.mem.eql(u8, tag_name, "body")) {
+            if (self.body_node) |body| {
+                if (body.attr.len == 0 and attrs.items.len > 0) {
+                    body.attr = try attrs.toOwnedSlice(self.allocator);
+                }
+                return;
             }
         }
 
         const node = try self.createNode(.element, tag_name);
         node.attr = try attrs.toOwnedSlice(self.allocator);
+
+        if (std.mem.eql(u8, tag_name, "head")) {
+            self.head_node = node;
+            self.head_inserted = true;
+        } else if (std.mem.eql(u8, tag_name, "body")) {
+            self.body_node = node;
+            self.body_inserted = true;
+        }
 
         const parent = self.currentNode();
         tree.appendChild(parent, node);
@@ -264,7 +293,7 @@ const Parser = struct {
             try self.open_elements.append(self.allocator, node);
 
             // Raw text elements: slurp content until closing tag.
-            if (raw_text_elements.has(tag_name)) {
+            if (raw_text_elements.has(tag_name) or rcdata_elements.has(tag_name)) {
                 try self.parseRawText(tag_name);
             }
         }
@@ -369,6 +398,9 @@ const Parser = struct {
         }
         const raw = self.input[start..self.pos];
         if (raw.len == 0) return;
+        if (self.fragment_context == null and isAllWhitespace(raw) and
+            (self.open_elements.items.len == 0 or
+                (self.open_elements.items.len == 1 and self.head_node == null and self.body_node == null))) return;
 
         const text = try self.decodeEntities(raw);
 
@@ -391,7 +423,11 @@ const Parser = struct {
                 }
                 const candidate = self.input[after_slash..end];
                 if (std.ascii.eqlIgnoreCase(candidate, tag_name)) {
-                    const text_content = self.input[start..self.pos];
+                    const raw_content = self.input[start..self.pos];
+                    const text_content = if (rcdata_elements.has(tag_name))
+                        try self.decodeEntities(raw_content)
+                    else
+                        raw_content;
                     if (text_content.len > 0) {
                         const text_node = try self.createNode(.text, text_content);
                         const parent = self.currentNode();
@@ -411,7 +447,11 @@ const Parser = struct {
             self.pos += 1;
         }
         // Unterminated raw text: emit rest as text.
-        const text_content = self.input[start..self.pos];
+        const raw_content = self.input[start..self.pos];
+        const text_content = if (rcdata_elements.has(tag_name))
+            try self.decodeEntities(raw_content)
+        else
+            raw_content;
         if (text_content.len > 0) {
             const text_node = try self.createNode(.text, text_content);
             const parent = self.currentNode();
@@ -474,7 +514,6 @@ const Parser = struct {
         while (i > 0) {
             i -= 1;
             const el = self.open_elements.items[i];
-            if (scope_elements.has(el.data)) break;
             for (closers) |closer| {
                 if (std.mem.eql(u8, el.data, closer)) {
                     // Pop everything from this element up.
@@ -482,6 +521,7 @@ const Parser = struct {
                     return;
                 }
             }
+            if (scope_elements.has(el.data)) break;
         }
     }
 
@@ -500,38 +540,39 @@ const Parser = struct {
             try self.open_elements.append(self.allocator, html_node);
         }
 
-        // Skip head tracking — if we see a non-head element, mark head done.
-        if (!self.head_inserted) {
-            if (is_head) {
-                self.head_inserted = true;
-                return;
-            }
-            const in_head = std.mem.eql(u8, tag_name, "meta") or
-                std.mem.eql(u8, tag_name, "link") or
-                std.mem.eql(u8, tag_name, "title") or
-                std.mem.eql(u8, tag_name, "style") or
-                std.mem.eql(u8, tag_name, "script") or
-                std.mem.eql(u8, tag_name, "base");
+        const in_head = is_head or std.mem.eql(u8, tag_name, "meta") or
+            std.mem.eql(u8, tag_name, "link") or
+            std.mem.eql(u8, tag_name, "title") or
+            std.mem.eql(u8, tag_name, "style") or
+            std.mem.eql(u8, tag_name, "script") or
+            std.mem.eql(u8, tag_name, "base");
 
-            if (!in_head) {
+        if (in_head and self.body_node == null) {
+            if (is_head) return;
+            if (self.head_node == null) {
+                const head = try self.createNode(.element, "head");
+                tree.appendChild(self.open_elements.items[0], head);
+                try self.open_elements.append(self.allocator, head);
+                self.head_node = head;
                 self.head_inserted = true;
+            } else if (self.open_elements.items.len == 1) {
+                try self.open_elements.append(self.allocator, self.head_node.?);
             }
+            return;
         }
 
-        // Ensure <body> exists for non-head content.
-        if (self.head_inserted and !self.body_inserted) {
-            if (is_body) {
-                // Explicit <body> tag — mark as inserted but let caller add it.
-                self.body_inserted = true;
-                return;
+        if (self.body_node == null) {
+            if (self.open_elements.items.len > 1 and self.open_elements.items[1] == self.head_node) {
+                self.open_elements.items.len = 1;
             }
-            if (!is_html) {
-                const body_node = try self.createNode(.element, "body");
-                const html_el = self.open_elements.items[0];
-                tree.appendChild(html_el, body_node);
-                try self.open_elements.append(self.allocator, body_node);
-                self.body_inserted = true;
-            }
+            if (is_body) return;
+            const body = try self.createNode(.element, "body");
+            tree.appendChild(self.open_elements.items[0], body);
+            try self.open_elements.append(self.allocator, body);
+            self.body_node = body;
+            self.body_inserted = true;
+        } else if (!is_html and !is_head and self.open_elements.items.len == 1) {
+            try self.open_elements.append(self.allocator, self.body_node.?);
         }
     }
 
@@ -590,7 +631,7 @@ const Parser = struct {
         var i: usize = 0;
         while (i < input.len) {
             if (input[i] == '&') {
-                const entity_result = self.decodeEntity(input, i);
+                const entity_result = try self.decodeEntity(input, i);
                 result.appendSlice(self.allocator, entity_result.text) catch return HtmlParseError.OutOfMemory;
                 i = entity_result.end;
             } else {
@@ -606,8 +647,7 @@ const Parser = struct {
         end: usize,
     };
 
-    fn decodeEntity(self: *Parser, input: []const u8, start: usize) EntityResult {
-        _ = self;
+    fn decodeEntity(self: *Parser, input: []const u8, start: usize) HtmlParseError!EntityResult {
         std.debug.assert(input[start] == '&');
         const after_amp = start + 1;
 
@@ -641,17 +681,17 @@ const Parser = struct {
                 const base: u8 = if (is_hex) 16 else 10;
                 if (std.fmt.parseInt(u21, num_str, base)) |codepoint| {
                     if (codepoint <= 0x10FFFF) {
-                        var buf: [4]u8 = undefined;
-                        const len = std.unicode.utf8Encode(codepoint, &buf) catch {
-                            return .{ .text = input[start .. num_end + 1], .end = num_end + 1 };
-                        };
-                        // Leak into arena — fine for document lifetime.
-                        _ = len;
                         var end = num_end;
                         if (end < input.len and input[end] == ';') end += 1;
-                        // Return raw entity for now — full entity decoding is complex
-                        // and rarely needed for CSS selector matching.
-                        return .{ .text = input[start..end], .end = end };
+                        const normalized: u21 = if (codepoint == 0 or
+                            (codepoint >= 0xD800 and codepoint <= 0xDFFF))
+                            0xFFFD
+                        else
+                            codepoint;
+                        var buf: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(normalized, &buf) catch unreachable;
+                        const encoded = self.allocator.dupe(u8, buf[0..len]) catch return HtmlParseError.OutOfMemory;
+                        return .{ .text = encoded, .end = end };
                     }
                 } else |_| {}
             }
@@ -690,6 +730,13 @@ fn isWhitespace(c: u8) bool {
 
 fn isAsciiAlpha(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
+}
+
+fn isAllWhitespace(input: []const u8) bool {
+    for (input) |c| {
+        if (!isWhitespace(c)) return false;
+    }
+    return true;
 }
 
 test "parse simple HTML" {

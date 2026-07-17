@@ -19,9 +19,14 @@ pub const CssParseError = error{
 
 /// Parse a CSS selector string into a Selector AST.
 /// All allocations go through the provided allocator (typically an arena).
+/// The input bytes must outlive the returned AST. Use `CompiledSelector` when
+/// an owning, reusable selector is needed.
 pub fn parseSelector(allocator: Allocator, input: []const u8) CssParseError!*const Selector {
     var p = CssParser.init(allocator, input);
-    return p.parseSelectorList();
+    const selector = try p.parseSelectorList();
+    _ = p.skipWhitespace();
+    if (p.pos != input.len) return CssParseError.UnexpectedToken;
+    return selector;
 }
 
 const CssParser = struct {
@@ -235,18 +240,25 @@ const CssParser = struct {
             _ = self.skipWhitespace();
 
             if (std.mem.eql(u8, name, "not")) {
-                const inner = try self.parseComplexSelector();
+                const inner = try self.parseSelectorList();
                 _ = self.skipWhitespace();
                 if (self.pos >= self.input.len or self.peek() != ')') return CssParseError.UnexpectedToken;
                 self.advance();
                 return self.create(Selector{ .not = inner });
             }
             if (std.mem.eql(u8, name, "has")) {
-                const inner = try self.parseComplexSelector();
+                const inner = try self.parseRelativeSelectorList();
                 _ = self.skipWhitespace();
                 if (self.pos >= self.input.len or self.peek() != ')') return CssParseError.UnexpectedToken;
                 self.advance();
                 return self.create(Selector{ .has_pseudo = inner });
+            }
+            if (std.mem.eql(u8, name, "is") or std.mem.eql(u8, name, "where")) {
+                const inner = try self.parseSelectorList();
+                _ = self.skipWhitespace();
+                if (self.pos >= self.input.len or self.peek() != ')') return CssParseError.UnexpectedToken;
+                self.advance();
+                return inner;
             }
             if (std.mem.eql(u8, name, "contains")) {
                 const text = try self.parseStringOrIdent();
@@ -299,7 +311,7 @@ const CssParser = struct {
             a = sign;
             self.advance();
         } else if (self.pos < self.input.len and std.ascii.isDigit(self.peek())) {
-            const num = self.parseNumber();
+            const num = try self.parseNumber();
             if (self.pos < self.input.len and self.peek() == 'n') {
                 a = sign * num;
                 self.advance();
@@ -316,24 +328,58 @@ const CssParser = struct {
             if (self.peek() == '+') {
                 self.advance();
                 _ = self.skipWhitespace();
-                b = self.parseNumber();
+                b = try self.parseNumber();
             } else if (self.peek() == '-') {
                 self.advance();
                 _ = self.skipWhitespace();
-                b = -self.parseNumber();
+                b = -(try self.parseNumber());
             }
         }
 
         return .{ a, b };
     }
 
-    fn parseNumber(self: *CssParser) i32 {
-        var result: i32 = 0;
+    fn parseNumber(self: *CssParser) CssParseError!i32 {
+        var result: i64 = 0;
         while (self.pos < self.input.len and std.ascii.isDigit(self.peek())) {
-            result = result * 10 + @as(i32, @intCast(self.peek() - '0'));
+            result = result * 10 + @as(i64, self.peek() - '0');
+            if (result > std.math.maxInt(i32)) return CssParseError.InvalidNthExpression;
             self.advance();
         }
-        return result;
+        return @intCast(result);
+    }
+
+    fn parseRelativeSelectorList(self: *CssParser) CssParseError!*const Selector {
+        var selectors: std.ArrayList(*const Selector) = .empty;
+
+        while (true) {
+            _ = self.skipWhitespace();
+            var kind: CombinatorKind = .descendant;
+            if (self.pos < self.input.len) {
+                kind = switch (self.peek()) {
+                    '>' => .child,
+                    '+' => .next_sibling,
+                    '~' => .subsequent_sibling,
+                    else => .descendant,
+                };
+                if (kind != .descendant) {
+                    self.advance();
+                    _ = self.skipWhitespace();
+                }
+            }
+
+            const inner = try self.parseComplexSelector();
+            try selectors.append(self.allocator, try self.create(.{ .relative = .{
+                .kind = kind,
+                .selector = inner,
+            } }));
+            _ = self.skipWhitespace();
+            if (self.pos >= self.input.len or self.peek() != ',') break;
+            self.advance();
+        }
+
+        if (selectors.items.len == 1) return selectors.items[0];
+        return self.create(.{ .group = try selectors.toOwnedSlice(self.allocator) });
     }
 
     fn matchKeyword(self: *CssParser, keyword: []const u8) bool {

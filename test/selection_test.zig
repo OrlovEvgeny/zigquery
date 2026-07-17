@@ -13,7 +13,7 @@ test "Selection.first" {
     var doc = try helper.parseDoc("<ul><li>A</li><li>B</li><li>C</li></ul>");
     defer doc.deinit();
     const lis = try doc.find("li");
-    const first = lis.first();
+    const first = try lis.first();
     try std.testing.expect(first.len() == 1);
     const t = try first.text();
     try std.testing.expectEqualStrings("A", t);
@@ -23,7 +23,7 @@ test "Selection.last" {
     var doc = try helper.parseDoc("<ul><li>A</li><li>B</li><li>C</li></ul>");
     defer doc.deinit();
     const lis = try doc.find("li");
-    const last = lis.last();
+    const last = try lis.last();
     try std.testing.expect(last.len() == 1);
     const t = try last.text();
     try std.testing.expectEqualStrings("C", t);
@@ -33,7 +33,7 @@ test "Selection.eq" {
     var doc = try helper.parseDoc("<ul><li>A</li><li>B</li><li>C</li></ul>");
     defer doc.deinit();
     const lis = try doc.find("li");
-    const second = lis.eq(1);
+    const second = try lis.eq(1);
     try std.testing.expect(second.len() == 1);
     const t = try second.text();
     try std.testing.expectEqualStrings("B", t);
@@ -43,7 +43,7 @@ test "Selection.eq negative index" {
     var doc = try helper.parseDoc("<ul><li>A</li><li>B</li><li>C</li></ul>");
     defer doc.deinit();
     const lis = try doc.find("li");
-    const last = lis.eq(-1);
+    const last = try lis.eq(-1);
     try std.testing.expect(last.len() == 1);
     const t = try last.text();
     try std.testing.expectEqualStrings("C", t);
@@ -62,7 +62,7 @@ test "Selection.slice" {
     var doc = try helper.parseDoc("<ul><li>A</li><li>B</li><li>C</li><li>D</li></ul>");
     defer doc.deinit();
     const lis = try doc.find("li");
-    const middle = lis.sliceRange(1, 3);
+    const middle = try lis.sliceRange(1, 3);
     try std.testing.expect(middle.len() == 2);
 }
 
@@ -95,11 +95,11 @@ test "empty selection operations" {
     defer doc.deinit();
     const empty = try doc.find("nonexistent");
     try std.testing.expect(empty.len() == 0);
-    try std.testing.expect(empty.first().len() == 0);
-    try std.testing.expect(empty.last().len() == 0);
+    try std.testing.expect((try empty.first()).len() == 0);
+    try std.testing.expect((try empty.last()).len() == 0);
     try std.testing.expect(empty.attr("id") == null);
     try std.testing.expect(!empty.hasClass("foo"));
-    try std.testing.expect(!empty.is("div"));
+    try std.testing.expect(!try empty.is("div"));
     try std.testing.expect(empty.get(0) == null);
     try std.testing.expect(empty.index() == null);
 }
@@ -108,7 +108,7 @@ test "Selection.end returns previous" {
     var doc = try helper.parseDoc("<div><p>A</p></div>");
     defer doc.deinit();
     const div = try doc.find("div");
-    const p_sel = div.children();
+    const p_sel = try div.children();
     try std.testing.expect(p_sel.len() == 1);
     const back = p_sel.end();
     try std.testing.expect(back.len() == 1);

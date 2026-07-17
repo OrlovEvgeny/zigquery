@@ -3,6 +3,18 @@ const Node = @import("node.zig").Node;
 const NodeType = @import("node.zig").NodeType;
 const Attribute = @import("node.zig").Attribute;
 
+pub const MutationError = error{
+    Cycle,
+    InvalidReference,
+};
+
+pub const ValidationError = error{
+    Cycle,
+    InvalidParent,
+    InvalidPreviousSibling,
+    InvalidLastChild,
+};
+
 /// Remove a node from its parent, updating sibling links.
 pub fn removeChild(parent: *Node, child: *Node) void {
     std.debug.assert(child.parent == parent);
@@ -34,8 +46,10 @@ pub fn detach(node: *Node) void {
 /// Insert `new_child` before `ref_child` under `parent`.
 /// If `ref_child` is null, appends to end.
 pub fn insertBefore(parent: *Node, new_child: *Node, ref_child: ?*Node) void {
+    std.debug.assert(!wouldCreateCycle(parent, new_child));
     if (ref_child) |ref| {
         std.debug.assert(ref.parent == parent);
+        if (ref == new_child) return;
         detach(new_child);
         new_child.parent = parent;
         new_child.next_sibling = ref;
@@ -53,6 +67,7 @@ pub fn insertBefore(parent: *Node, new_child: *Node, ref_child: ?*Node) void {
 
 /// Append a child node to the end of parent's children.
 pub fn appendChild(parent: *Node, child: *Node) void {
+    std.debug.assert(!wouldCreateCycle(parent, child));
     detach(child);
     child.parent = parent;
     child.prev_sibling = parent.last_child;
@@ -66,16 +81,69 @@ pub fn appendChild(parent: *Node, child: *Node) void {
     parent.last_child = child;
 }
 
+/// Insert a node while rejecting invalid references and ancestor cycles.
+pub fn insertBeforeChecked(parent: *Node, new_child: *Node, ref_child: ?*Node) MutationError!void {
+    if (ref_child) |ref| {
+        if (ref.parent != parent) return error.InvalidReference;
+    }
+    if (wouldCreateCycle(parent, new_child)) return error.Cycle;
+    insertBefore(parent, new_child, ref_child);
+}
+
+/// Append a node while rejecting ancestor cycles.
+pub fn appendChildChecked(parent: *Node, child: *Node) MutationError!void {
+    if (wouldCreateCycle(parent, child)) return error.Cycle;
+    appendChild(parent, child);
+}
+
+fn wouldCreateCycle(parent: *const Node, child: *const Node) bool {
+    if (parent == child) return true;
+    var current = parent.parent;
+    while (current) |ancestor| : (current = ancestor.parent) {
+        if (ancestor == child) return true;
+    }
+    return false;
+}
+
+/// Validate parent, sibling, and last-child links for a subtree.
+pub fn validate(allocator: std.mem.Allocator, root: *const Node) (ValidationError || std.mem.Allocator.Error)!void {
+    var seen = std.AutoHashMap(*const Node, void).init(allocator);
+    defer seen.deinit();
+    try validateNode(root, root.parent, &seen);
+}
+
+fn validateNode(node: *const Node, expected_parent: ?*Node, seen: *std.AutoHashMap(*const Node, void)) (ValidationError || std.mem.Allocator.Error)!void {
+    if (seen.contains(node)) return error.Cycle;
+    try seen.put(node, {});
+    if (node.parent != expected_parent) return error.InvalidParent;
+
+    var previous: ?*Node = null;
+    var child = node.first_child;
+    while (child) |current| {
+        if (current.prev_sibling != previous) return error.InvalidPreviousSibling;
+        try validateNode(current, @constCast(node), seen);
+        previous = current;
+        child = current.next_sibling;
+    }
+    if (node.last_child != previous) return error.InvalidLastChild;
+}
+
 /// Deep-clone a node and all its descendants using the given arena.
 pub fn cloneNode(allocator: std.mem.Allocator, original: *const Node) !*Node {
     const new_attrs = try allocator.alloc(Attribute, original.attr.len);
-    @memcpy(new_attrs, original.attr);
+    for (original.attr, 0..) |attr, i| {
+        new_attrs[i] = .{
+            .namespace = try allocator.dupe(u8, attr.namespace),
+            .key = try allocator.dupe(u8, attr.key),
+            .val = try allocator.dupe(u8, attr.val),
+        };
+    }
 
     const node = try allocator.create(Node);
     node.* = .{
         .node_type = original.node_type,
-        .data = original.data,
-        .namespace = original.namespace,
+        .data = try allocator.dupe(u8, original.data),
+        .namespace = try allocator.dupe(u8, original.namespace),
         .attr = new_attrs,
         .parent = null,
         .first_child = null,
@@ -146,6 +214,11 @@ test "insertBefore" {
     try std.testing.expect(child1.next_sibling == &child2);
     try std.testing.expect(child2.next_sibling == &child3);
     try std.testing.expect(parent.last_child == &child3);
+
+    insertBefore(&parent, &child2, &child2);
+    try std.testing.expect(child1.next_sibling == &child2);
+    try std.testing.expect(child2.next_sibling == &child3);
+    try validate(std.testing.allocator, &parent);
 }
 
 test "cloneNode" {
@@ -165,4 +238,22 @@ test "cloneNode" {
     // Cloned nodes are distinct pointers.
     try std.testing.expect(cloned != &parent);
     try std.testing.expect(cloned.first_child.? != &child);
+}
+
+test "checked mutations reject cycles" {
+    var parent = Node{ .node_type = .element, .data = "div" };
+    var child = Node{ .node_type = .element, .data = "span" };
+    appendChild(&parent, &child);
+
+    try std.testing.expectError(error.Cycle, appendChildChecked(&child, &parent));
+    try validate(std.testing.allocator, &parent);
+}
+
+test "validate detects broken sibling links" {
+    var parent = Node{ .node_type = .element, .data = "div" };
+    var child = Node{ .node_type = .element, .data = "span" };
+    appendChild(&parent, &child);
+    child.prev_sibling = &child;
+
+    try std.testing.expectError(error.InvalidPreviousSibling, validate(std.testing.allocator, &parent));
 }
