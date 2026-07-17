@@ -48,8 +48,11 @@ pub fn main() !void {
 Add zigquery as a dependency in your `build.zig.zon`:
 
 ```sh
-zig fetch --save git+https://github.com/evgenyorlov/zigquery
+zig fetch --save git+https://github.com/OrlovEvgeny/zigquery
 ```
+
+If Zig reports an invalid fingerprint, make sure the repository owner is
+`OrlovEvgeny` and rerun `zig fetch --save` with the corrected URL.
 
 Then in your `build.zig`:
 
