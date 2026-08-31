@@ -213,9 +213,29 @@ const Parser = struct {
 
         // Parse attributes.
         var attrs: std.ArrayList(Attribute) = .empty;
-        while (self.pos < self.input.len and self.input[self.pos] != '>' and self.input[self.pos] != '/') {
+        var self_closing = false;
+        while (self.pos < self.input.len) {
             self.skipWhitespace();
-            if (self.pos >= self.input.len or self.input[self.pos] == '>' or self.input[self.pos] == '/') break;
+            if (self.pos >= self.input.len) break;
+
+            const c = self.input[self.pos];
+            if (c == '>') {
+                self.pos += 1;
+                break;
+            }
+            if (c == '/') {
+                // A solidus here only closes the tag when '>' follows it
+                // immediately; otherwise it is a stray character and the next
+                // attribute still has to be parsed.
+                self.pos += 1;
+                if (self.pos < self.input.len and self.input[self.pos] == '>') {
+                    self_closing = true;
+                    self.pos += 1;
+                    break;
+                }
+                continue;
+            }
+
             const attr = try self.parseAttribute();
             var duplicate = false;
             for (attrs.items) |existing| {
@@ -225,16 +245,6 @@ const Parser = struct {
                 }
             }
             if (!duplicate) try attrs.append(self.allocator, attr);
-            self.skipWhitespace();
-        }
-
-        var self_closing = false;
-        if (self.pos < self.input.len and self.input[self.pos] == '/') {
-            self_closing = true;
-            self.pos += 1;
-        }
-        if (self.pos < self.input.len and self.input[self.pos] == '>') {
-            self.pos += 1;
         }
 
         // Handle auto-closing of open elements.
@@ -497,10 +507,11 @@ const Parser = struct {
             return self.decodeEntities(raw);
         }
 
-        // Unquoted value.
+        // Unquoted value: only whitespace and '>' terminate it. A solidus is
+        // an ordinary value character here, so `href=a/b/` keeps its slashes.
         const start = self.pos;
         while (self.pos < self.input.len and !isWhitespace(self.input[self.pos]) and
-            self.input[self.pos] != '>' and self.input[self.pos] != '/')
+            self.input[self.pos] != '>')
         {
             self.pos += 1;
         }
@@ -795,4 +806,38 @@ test "parse entities" {
 
     const doc = try parse(arena.allocator(), "<p>&amp; &lt; &gt;</p>");
     _ = doc;
+}
+
+test "unquoted attribute values keep slashes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const doc = try parse(arena.allocator(), "<a href=books/learning-zig/chapter11/ class=link>Chapter 11</a>");
+
+    const a = findElement(doc, "a").?;
+    try std.testing.expectEqualStrings("books/learning-zig/chapter11/", a.getAttr("href").?);
+    try std.testing.expectEqualStrings("link", a.getAttr("class").?);
+}
+
+test "solidus only self closes a tag when '>' follows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const doc = try parse(arena.allocator(), "<div id=a / class=b><img src=x/y.png /></div>");
+
+    const div = findElement(doc, "div").?;
+    try std.testing.expectEqualStrings("a", div.getAttr("id").?);
+    try std.testing.expectEqualStrings("b", div.getAttr("class").?);
+
+    const img = findElement(doc, "img").?;
+    try std.testing.expectEqualStrings("x/y.png", img.getAttr("src").?);
+}
+
+fn findElement(root: *Node, tag: []const u8) ?*Node {
+    if (root.node_type == .element and std.mem.eql(u8, root.data, tag)) return root;
+    var child = root.first_child;
+    while (child) |c| : (child = c.next_sibling) {
+        if (findElement(c, tag)) |found| return found;
+    }
+    return null;
 }

@@ -127,3 +127,93 @@ test "duplicate attributes keep the first value" {
     try std.testing.expectEqualStrings("first", div.attr("id").?);
     try std.testing.expectEqual(@as(usize, 1), div.nodes[0].attr.len);
 }
+
+test "unquoted attribute value keeps slashes" {
+    var doc = try zq.Document.initFromSlice(
+        std.testing.allocator,
+        "<a href=books/learning-zig/chapter11/ class=link>Chapter 11</a>",
+    );
+    defer doc.deinit();
+
+    const a = try doc.find("a");
+    try std.testing.expectEqual(@as(usize, 1), a.len());
+    try std.testing.expectEqualStrings("books/learning-zig/chapter11/", a.attr("href").?);
+    try std.testing.expectEqualStrings("link", a.attr("class").?);
+
+    const t = try a.text();
+    try std.testing.expectEqualStrings("Chapter 11", t);
+}
+
+test "unquoted attributes across a minified document" {
+    const html =
+        "<!DOCTYPE html>" ++
+        "<html lang=en>" ++
+        "<head><meta charset=UTF-8>" ++
+        "<meta name=viewport content=\"width=device-width, initial-scale=1.0\">" ++
+        "<title>Document</title></head>" ++
+        "<body><a href=books/learning-zig/chapter11/ class=link>Chapter 11</a></body>" ++
+        "</html>";
+
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, html);
+    defer doc.deinit();
+
+    try std.testing.expectEqualStrings("en", (try doc.find("html")).attr("lang").?);
+    try std.testing.expectEqualStrings("UTF-8", (try doc.find("meta[charset]")).attr("charset").?);
+    try std.testing.expectEqualStrings(
+        "width=device-width, initial-scale=1.0",
+        (try doc.find("meta[name=viewport]")).attr("content").?,
+    );
+    try std.testing.expectEqualStrings("Document", try (try doc.find("title")).text());
+
+    const links = try doc.find("a.link");
+    try std.testing.expectEqual(@as(usize, 1), links.len());
+    try std.testing.expectEqualStrings("books/learning-zig/chapter11/", links.attr("href").?);
+}
+
+test "unquoted attribute followed by self closing slash" {
+    var doc = try zq.Document.initFromSlice(
+        std.testing.allocator,
+        "<div><img src=a/b.png /><img src=c.png></div>",
+    );
+    defer doc.deinit();
+
+    const imgs = try doc.find("img");
+    try std.testing.expectEqual(@as(usize, 2), imgs.len());
+    try std.testing.expectEqualStrings("a/b.png", imgs.nodes[0].getAttr("src").?);
+    try std.testing.expectEqualStrings("c.png", imgs.nodes[1].getAttr("src").?);
+}
+
+test "trailing slash without gap belongs to unquoted value" {
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, "<a href=/docs/>text</a>");
+    defer doc.deinit();
+
+    const a = try doc.find("a");
+    try std.testing.expectEqual(@as(usize, 1), a.len());
+    try std.testing.expectEqualStrings("/docs/", a.attr("href").?);
+    try std.testing.expectEqualStrings("text", try a.text());
+}
+
+test "stray slash between attributes does not drop them" {
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, "<div id=a / class=b></div>");
+    defer doc.deinit();
+
+    const div = try doc.find("div");
+    try std.testing.expectEqual(@as(usize, 1), div.len());
+    try std.testing.expectEqualStrings("a", div.attr("id").?);
+    try std.testing.expectEqualStrings("b", div.attr("class").?);
+}
+
+test "void element self closes with unquoted attribute" {
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, "<p>a<br/>b</p>");
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), (try doc.find("br")).len());
+    try std.testing.expectEqual(@as(usize, 1), (try doc.find("p")).len());
+}
+
+test "unquoted value decodes entities" {
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, "<a href=/a&amp;b/c>x</a>");
+    defer doc.deinit();
+
+    try std.testing.expectEqualStrings("/a&b/c", (try doc.find("a")).attr("href").?);
+}
