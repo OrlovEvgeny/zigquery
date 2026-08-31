@@ -12,48 +12,60 @@ const css_matcher = @import("css/matcher.zig");
 const Selector = @import("css/selector.zig").Selector;
 const Matcher = css_matcher.Matcher;
 const CompiledSelector = @import("css/compiled.zig").CompiledSelector;
-const Document = @import("document.zig").Document;
+const Query = @import("query.zig").Query;
 
 const max_int = std.math.maxInt(usize);
 
+/// A set of matched nodes, plus the query scope that owns the memory backing
+/// them.
+///
+/// `Selection` is a value type and is passed by value. It borrows both its
+/// node slice and its `Query`, so it must not outlive the `Query` it came
+/// from -- `q.deinit()` or `q.reset()` invalidates every `Selection` obtained
+/// through it.
 pub const Selection = struct {
     nodes: []*Node,
-    document: *Document,
+    q: *Query,
     prev_sel: ?*const Selection = null,
 
-    pub fn initSingle(node: *Node, doc: *Document) !Selection {
-        const nodes_buf = try doc.allocator().alloc(*Node, 1);
+    pub fn initSingle(node: *Node, q: *Query) !Selection {
+        const nodes_buf = try q.scratch().alloc(*Node, 1);
         nodes_buf[0] = node;
-        return .{ .nodes = nodes_buf, .document = doc };
+        return .{ .nodes = nodes_buf, .q = q };
     }
 
-    pub fn initEmpty(doc: *Document) Selection {
-        return .{ .nodes = &.{}, .document = doc };
+    pub fn initEmpty(q: *Query) Selection {
+        return .{ .nodes = &.{}, .q = q };
     }
 
-    pub fn initFromSlice(nodes: []*Node, doc: *Document) Selection {
-        return .{ .nodes = nodes, .document = doc };
+    pub fn initFromSlice(nodes: []*Node, q: *Query) Selection {
+        return .{ .nodes = nodes, .q = q };
+    }
+
+    /// The document these nodes belong to.
+    pub fn document(self: Selection) *@import("document.zig").Document {
+        return self.q.doc;
     }
 
     // Traversal.
 
     /// Find descendants matching a CSS selector string.
     pub fn find(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.findMatcher(m);
     }
 
     /// Find descendants matching a compiled Matcher.
     pub fn findMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.pushStack(try findWithMatcher(alloc, self.nodes, m));
     }
 
     /// Find descendants using a reusable compiled selector.
     pub fn findCompiled(self: Selection, compiled: *const CompiledSelector) !Selection {
-        return self.findMatcher(compiled.matcher(self.document.allocator()));
+        return self.findMatcher(compiled.matcher(self.q.scratch()));
     }
 
     /// Find descendants matching nodes from another Selection.
@@ -63,7 +75,7 @@ pub const Selection = struct {
 
     /// Find descendants matching specific nodes.
     pub fn findNodes(self: Selection, target_nodes: []*Node) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         var result: std.ArrayList(*Node) = .empty;
         for (target_nodes) |target| {
             if (sliceContains(self.nodes, target)) {
@@ -75,27 +87,27 @@ pub const Selection = struct {
 
     /// Get child elements.
     pub fn children(self: Selection) !Selection {
-        return self.pushStack(try getChildrenNodes(self.document.allocator(), self.nodes, .all));
+        return self.pushStack(try getChildrenNodes(self.q.scratch(), self.nodes, .all));
     }
 
     /// Get child elements matching a CSS selector.
     pub fn childrenFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.childrenMatcher(m);
     }
 
     /// Get child elements matching a Matcher.
     pub fn childrenMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         const raw = try getChildrenNodes(alloc, self.nodes, .all);
         return self.filterAndPush(raw, m);
     }
 
     /// Get all children including text and comment nodes.
     pub fn contents(self: Selection) !Selection {
-        return self.pushStack(try getChildrenNodes(self.document.allocator(), self.nodes, .all_including_non_elements));
+        return self.pushStack(try getChildrenNodes(self.q.scratch(), self.nodes, .all_including_non_elements));
     }
 
     /// Get contents filtered by selector. Since selectors only act on elements,
@@ -107,39 +119,39 @@ pub const Selection = struct {
 
     /// Get parent of each element.
     pub fn parent(self: Selection) !Selection {
-        return self.pushStack(try getParentNodes(self.document.allocator(), self.nodes));
+        return self.pushStack(try getParentNodes(self.q.scratch(), self.nodes));
     }
 
     /// Get parent of each element, filtered by selector.
     pub fn parentFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.parentMatcher(m);
     }
 
     /// Get parent filtered by Matcher.
     pub fn parentMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.filterAndPush(try getParentNodes(alloc, self.nodes), m);
     }
 
     /// Get all ancestors.
     pub fn parents(self: Selection) !Selection {
-        return self.pushStack(try getParentsNodes(self.document.allocator(), self.nodes, null, null));
+        return self.pushStack(try getParentsNodes(self.q.scratch(), self.nodes, null, null));
     }
 
     /// Get all ancestors filtered by selector.
     pub fn parentsFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.parentsMatcher(m);
     }
 
     /// Get all ancestors filtered by Matcher.
     pub fn parentsMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.filterAndPush(try getParentsNodes(alloc, self.nodes, null, null), m);
     }
 
@@ -151,7 +163,7 @@ pub const Selection = struct {
 
     /// Get ancestors up to (not including) the element matching options.
     pub fn parentsUntil(self: Selection, opts: UntilOpts) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         const raw = try getParentsNodes(alloc, self.nodes, opts.until, opts.until_nodes);
         if (opts.filter) |f| {
             return self.filterAndPush(raw, f);
@@ -161,25 +173,23 @@ pub const Selection = struct {
 
     /// Get first ancestor matching the selector, testing the element itself first.
     pub fn closest(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.closestMatcher(m);
     }
 
     /// Get first ancestor matching the Matcher.
     pub fn closestMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         var result: std.ArrayList(*Node) = .empty;
-        var seen = std.AutoHashMap(*Node, void).init(alloc);
+        var marks: VisitMarks = .{};
+        defer marks.clear(alloc);
         for (self.nodes) |n| {
             var cur: ?*Node = n;
             while (cur) |c| {
                 if (c.node_type == .element and m.match(c)) {
-                    if (!seen.contains(c)) {
-                        try seen.put(c, {});
-                        try result.append(alloc, c);
-                    }
+                    if (!try marks.seen(alloc, c)) try result.append(alloc, c);
                     break;
                 }
                 cur = c.parent;
@@ -190,22 +200,20 @@ pub const Selection = struct {
 
     /// Get first ancestor matching a reusable compiled selector.
     pub fn closestCompiled(self: Selection, compiled: *const CompiledSelector) !Selection {
-        return self.closestMatcher(compiled.matcher(self.document.allocator()));
+        return self.closestMatcher(compiled.matcher(self.q.scratch()));
     }
 
     /// Get first ancestor matching one of the given nodes.
     pub fn closestNodes(self: Selection, target_nodes: []*Node) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         var result: std.ArrayList(*Node) = .empty;
-        var seen = std.AutoHashMap(*Node, void).init(alloc);
+        var marks: VisitMarks = .{};
+        defer marks.clear(alloc);
         for (self.nodes) |n| {
             var cur: ?*Node = n;
             while (cur) |c| {
                 if (isInSlice(target_nodes, c)) {
-                    if (!seen.contains(c)) {
-                        try seen.put(c, {});
-                        try result.append(alloc, c);
-                    }
+                    if (!try marks.seen(alloc, c)) try result.append(alloc, c);
                     break;
                 }
                 cur = c.parent;
@@ -221,64 +229,64 @@ pub const Selection = struct {
 
     /// Get siblings of each element (excluding the element itself).
     pub fn siblings(self: Selection) !Selection {
-        return self.pushStack(try getSiblingNodes(self.document.allocator(), self.nodes, .all, null, null));
+        return self.pushStack(try getSiblingNodes(self.q.scratch(), self.nodes, .all, null, null));
     }
 
     /// Get siblings filtered by CSS selector.
     pub fn siblingsFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.siblingsMatcher(m);
     }
 
     /// Get siblings filtered by Matcher.
     pub fn siblingsMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.filterAndPush(try getSiblingNodes(alloc, self.nodes, .all, null, null), m);
     }
 
     /// Get immediately following sibling element.
     pub fn next(self: Selection) !Selection {
-        return self.pushStack(try getSiblingNodes(self.document.allocator(), self.nodes, .next, null, null));
+        return self.pushStack(try getSiblingNodes(self.q.scratch(), self.nodes, .next, null, null));
     }
 
     /// Get next sibling filtered by selector.
     pub fn nextFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.nextMatcher(m);
     }
 
     /// Get next sibling filtered by Matcher.
     pub fn nextMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.filterAndPush(try getSiblingNodes(alloc, self.nodes, .next, null, null), m);
     }
 
     /// Get all following siblings.
     pub fn nextAll(self: Selection) !Selection {
-        return self.pushStack(try getSiblingNodes(self.document.allocator(), self.nodes, .next_all, null, null));
+        return self.pushStack(try getSiblingNodes(self.q.scratch(), self.nodes, .next_all, null, null));
     }
 
     /// Get all following siblings filtered by selector.
     pub fn nextAllFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.nextAllMatcher(m);
     }
 
     /// Get all following siblings filtered by Matcher.
     pub fn nextAllMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.filterAndPush(try getSiblingNodes(alloc, self.nodes, .next_all, null, null), m);
     }
 
     /// Get all following siblings until a matcher/nodes boundary.
     pub fn nextUntil(self: Selection, opts: UntilOpts) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         const raw = try getSiblingNodes(alloc, self.nodes, .next_until, opts.until, opts.until_nodes);
         if (opts.filter) |f| return self.filterAndPush(raw, f);
         return self.pushStack(raw);
@@ -286,45 +294,45 @@ pub const Selection = struct {
 
     /// Get immediately preceding sibling element.
     pub fn prev(self: Selection) !Selection {
-        return self.pushStack(try getSiblingNodes(self.document.allocator(), self.nodes, .prev, null, null));
+        return self.pushStack(try getSiblingNodes(self.q.scratch(), self.nodes, .prev, null, null));
     }
 
     /// Get previous sibling filtered by selector.
     pub fn prevFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.prevMatcher(m);
     }
 
     /// Get previous sibling filtered by Matcher.
     pub fn prevMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.filterAndPush(try getSiblingNodes(alloc, self.nodes, .prev, null, null), m);
     }
 
     /// Get all preceding siblings.
     pub fn prevAll(self: Selection) !Selection {
-        return self.pushStack(try getSiblingNodes(self.document.allocator(), self.nodes, .prev_all, null, null));
+        return self.pushStack(try getSiblingNodes(self.q.scratch(), self.nodes, .prev_all, null, null));
     }
 
     /// Get all preceding siblings filtered by selector.
     pub fn prevAllFiltered(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.prevAllMatcher(m);
     }
 
     /// Get all preceding siblings filtered by Matcher.
     pub fn prevAllMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return self.filterAndPush(try getSiblingNodes(alloc, self.nodes, .prev_all, null, null), m);
     }
 
     /// Get all preceding siblings until a matcher/nodes boundary.
     pub fn prevUntil(self: Selection, opts: UntilOpts) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         const raw = try getSiblingNodes(alloc, self.nodes, .prev_until, opts.until, opts.until_nodes);
         if (opts.filter) |f| return self.filterAndPush(raw, f);
         return self.pushStack(raw);
@@ -334,8 +342,8 @@ pub const Selection = struct {
 
     /// Filter to elements matching the CSS selector.
     pub fn filter(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.filterMatcher(m);
     }
@@ -347,7 +355,7 @@ pub const Selection = struct {
 
     /// Filter using a reusable compiled selector.
     pub fn filterCompiled(self: Selection, compiled: *const CompiledSelector) !Selection {
-        return self.filterMatcher(compiled.matcher(self.document.allocator()));
+        return self.filterMatcher(compiled.matcher(self.q.scratch()));
     }
 
     /// Filter using a callback function.
@@ -367,8 +375,8 @@ pub const Selection = struct {
 
     /// Remove elements matching the CSS selector.
     pub fn not(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.notMatcher(m);
     }
@@ -395,15 +403,15 @@ pub const Selection = struct {
 
     /// Reduce to elements that have a descendant matching the selector.
     pub fn has(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.hasMatcher(m);
     }
 
     /// Reduce to elements that have a descendant matching a Matcher.
     pub fn hasMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         var result: std.ArrayList(*Node) = .empty;
         for (self.nodes) |n| {
             if (hasDescendantMatch(n, m)) {
@@ -415,12 +423,12 @@ pub const Selection = struct {
 
     /// Reduce to elements having a descendant matched by a compiled selector.
     pub fn hasCompiled(self: Selection, compiled: *const CompiledSelector) !Selection {
-        return self.hasMatcher(compiled.matcher(self.document.allocator()));
+        return self.hasMatcher(compiled.matcher(self.q.scratch()));
     }
 
     /// Reduce to elements that have a descendant matching given nodes.
     pub fn hasNodes(self: Selection, target_nodes: []*Node) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         var result: std.ArrayList(*Node) = .empty;
         for (self.nodes) |n| {
             for (target_nodes) |target| {
@@ -446,15 +454,15 @@ pub const Selection = struct {
     /// Return to the previous selection in the chain.
     pub fn end(self: Selection) Selection {
         if (self.prev_sel) |p| return p.*;
-        return Selection.initEmpty(self.document);
+        return Selection.initEmpty(self.q);
     }
 
     // Query.
 
     /// Check if any element matches the CSS selector.
     pub fn is(self: Selection, selector: []const u8) !bool {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.isMatcher(m);
     }
@@ -469,13 +477,13 @@ pub const Selection = struct {
 
     /// Check if any element matches a reusable compiled selector.
     pub fn isCompiled(self: Selection, compiled: *const CompiledSelector) bool {
-        return self.isMatcher(compiled.matcher(self.document.allocator()));
+        return self.isMatcher(compiled.matcher(self.q.scratch()));
     }
 
     /// Check if any element matches using a callback.
     pub fn isFn(self: Selection, f: *const fn (usize, Selection) bool) bool {
         for (self.nodes, 0..) |_, i| {
-            if (f(i, Selection.initFromSlice(self.nodes[i .. i + 1], self.document))) return true;
+            if (f(i, Selection.initFromSlice(self.nodes[i .. i + 1], self.q))) return true;
         }
         return false;
     }
@@ -555,14 +563,14 @@ pub const Selection = struct {
     /// Position of first element relative to elements matching selector.
     pub fn indexOfSelector(self: Selection, selector: []const u8) !?usize {
         if (self.nodes.len == 0) return null;
-        const doc_sel = try self.document.find(selector);
+        const doc_sel = try self.q.find(selector);
         return indexInSlice(doc_sel.nodes, self.nodes[0]);
     }
 
     /// Position of first element relative to elements matched by Matcher.
     pub fn indexOfMatcher(self: Selection, m: Matcher) !?usize {
         if (self.nodes.len == 0) return null;
-        const doc_sel = try self.document.findMatcher(m);
+        const doc_sel = try self.q.findMatcher(m);
         return indexInSlice(doc_sel.nodes, self.nodes[0]);
     }
 
@@ -593,14 +601,14 @@ pub const Selection = struct {
     /// single-element Selection.
     pub fn each(self: Selection, f: *const fn (usize, Selection) void) void {
         for (self.nodes, 0..) |_, i| {
-            f(i, Selection.initFromSlice(self.nodes[i .. i + 1], self.document));
+            f(i, Selection.initFromSlice(self.nodes[i .. i + 1], self.q));
         }
     }
 
     /// Like each but the callback can return false to break.
     pub fn eachWithBreak(self: Selection, f: *const fn (usize, Selection) bool) void {
         for (self.nodes, 0..) |_, i| {
-            if (!f(i, Selection.initFromSlice(self.nodes[i .. i + 1], self.document))) return;
+            if (!f(i, Selection.initFromSlice(self.nodes[i .. i + 1], self.q))) return;
         }
     }
 
@@ -617,7 +625,7 @@ pub const Selection = struct {
             if (self.pos >= self.sel.nodes.len) return null;
             const pos = self.pos;
             self.pos += 1;
-            return Selection.initFromSlice(self.sel.nodes[pos .. pos + 1], self.sel.document);
+            return Selection.initFromSlice(self.sel.nodes[pos .. pos + 1], self.sel.q);
         }
     };
 
@@ -636,7 +644,7 @@ pub const Selection = struct {
 
     /// Set an attribute on all elements.
     pub fn setAttr(self: Selection, name: []const u8, val: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         var pending: std.ArrayList(PendingAttribute) = .empty;
         for (self.nodes) |n| {
             if (n.node_type == .element) {
@@ -678,7 +686,7 @@ pub const Selection = struct {
     }
 
     fn updateClasses(self: Selection, classes: []const u8, mode: ClassUpdateMode) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         var pending: std.ArrayList(PendingAttribute) = .empty;
         for (self.nodes) |n| {
             if (n.node_type != .element) continue;
@@ -696,13 +704,13 @@ pub const Selection = struct {
     /// Get inner HTML of the first element.
     pub fn html(self: Selection) ![]const u8 {
         if (self.nodes.len == 0) return "";
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         return html_render.renderChildrenToString(alloc, self.nodes[0]);
     }
 
     /// Get combined text content of all elements.
     pub fn text(self: Selection) ![]const u8 {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         var buf: std.ArrayList(u8) = .empty;
         for (self.nodes) |n| {
             try collectText(alloc, n, &buf);
@@ -714,7 +722,7 @@ pub const Selection = struct {
 
     /// Insert nodes after each element in the selection.
     pub fn afterNodes(self: Selection, ns: []*Node) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try cloneNodesForTargets(alloc, self.nodes.len, ns);
         for (self.nodes, prepared) |sn, clones| {
             if (sn.parent == null) continue;
@@ -727,7 +735,7 @@ pub const Selection = struct {
 
     /// Insert HTML after each element.
     pub fn afterHtml(self: Selection, html_str: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try prepareFragments(alloc, self.nodes, html_str, .parent);
         for (self.nodes, prepared) |n, nodes| {
             const parent_node = n.parent orelse continue;
@@ -740,7 +748,7 @@ pub const Selection = struct {
 
     /// Insert nodes before each element.
     pub fn beforeNodes(self: Selection, ns: []*Node) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try cloneNodesForTargets(alloc, self.nodes.len, ns);
         for (self.nodes, prepared) |sn, clones| {
             if (sn.parent == null) continue;
@@ -752,7 +760,7 @@ pub const Selection = struct {
 
     /// Insert HTML before each element.
     pub fn beforeHtml(self: Selection, html_str: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try prepareFragments(alloc, self.nodes, html_str, .parent);
         for (self.nodes, prepared) |n, nodes| {
             const parent_node = n.parent orelse continue;
@@ -764,7 +772,7 @@ pub const Selection = struct {
 
     /// Append nodes as children of each element.
     pub fn appendNodes(self: Selection, ns: []*Node) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try cloneNodesForTargets(alloc, self.nodes.len, ns);
         for (self.nodes, prepared) |sn, clones| {
             if (sn.node_type != .element and sn.node_type != .document) continue;
@@ -776,7 +784,7 @@ pub const Selection = struct {
 
     /// Append parsed HTML as children of each element.
     pub fn appendHtml(self: Selection, html_str: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try prepareFragments(alloc, self.nodes, html_str, .element);
         for (self.nodes, prepared) |n, nodes| {
             if (n.node_type != .element and n.node_type != .document) continue;
@@ -788,7 +796,7 @@ pub const Selection = struct {
 
     /// Prepend nodes as first children of each element.
     pub fn prependNodes(self: Selection, ns: []*Node) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try cloneNodesForTargets(alloc, self.nodes.len, ns);
         for (self.nodes, prepared) |sn, clones| {
             if (sn.node_type != .element and sn.node_type != .document) continue;
@@ -801,7 +809,7 @@ pub const Selection = struct {
 
     /// Prepend parsed HTML.
     pub fn prependHtml(self: Selection, html_str: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try prepareFragments(alloc, self.nodes, html_str, .element);
         for (self.nodes, prepared) |n, nodes| {
             if (n.node_type != .element and n.node_type != .document) continue;
@@ -844,14 +852,14 @@ pub const Selection = struct {
 
     /// Deep-clone the matched elements.
     pub fn cloneSel(self: Selection) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const cloned = try tree.cloneNodes(alloc, self.nodes);
-        return Selection.initFromSlice(cloned, self.document);
+        return Selection.initFromSlice(cloned, self.q);
     }
 
     /// Remove all children from each element, returning removed children.
     pub fn empty(self: Selection) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         var removed: std.ArrayList(*Node) = .empty;
         for (self.nodes) |n| {
             var child = n.first_child;
@@ -871,7 +879,7 @@ pub const Selection = struct {
 
     /// Set inner HTML of each element.
     pub fn setHtml(self: Selection, html_str: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try prepareFragments(alloc, self.nodes, html_str, .element);
         for (self.nodes) |n| {
             if (n.node_type != .element and n.node_type != .document) continue;
@@ -887,7 +895,7 @@ pub const Selection = struct {
 
     /// Set literal text content.
     pub fn setText(self: Selection, text_str: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try alloc.alloc(?*Node, self.nodes.len);
         for (self.nodes, prepared) |n, *text_node| {
             if (n.node_type != .element and n.node_type != .document) {
@@ -923,7 +931,7 @@ pub const Selection = struct {
     /// Wrap each element inside a clone of the first matched wrapper node.
     pub fn wrapNode(self: Selection, wrapper: *Node) !void {
         if (wrapper.node_type != .element) return error.InvalidWrapper;
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const wraps = try cloneNodesForTargets(alloc, self.nodes.len, &.{wrapper});
         for (self.nodes, wraps) |n, clones| {
             const wrap = clones[0];
@@ -942,7 +950,7 @@ pub const Selection = struct {
 
     /// Wrap each element inside the first element matched by HTML string.
     pub fn wrapHtml(self: Selection, html_str: []const u8) !void {
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const prepared = try prepareFragments(alloc, self.nodes, html_str, .parent_or_synthetic);
         for (prepared) |parsed| {
             if (parsed.len > 0 and firstElement(parsed) == null) return error.InvalidWrapper;
@@ -966,7 +974,7 @@ pub const Selection = struct {
     pub fn wrapAllNode(self: Selection, wrapper: *Node) !void {
         if (self.nodes.len == 0) return;
         if (wrapper.node_type != .element) return error.InvalidWrapper;
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const wrap = try tree.cloneNode(alloc, wrapper);
         const first_node = self.nodes[0];
         if (first_node.parent) |p| {
@@ -985,7 +993,7 @@ pub const Selection = struct {
     /// Wrap content of each element.
     pub fn wrapInnerNode(self: Selection, wrapper: *Node) !void {
         if (wrapper.node_type != .element) return error.InvalidWrapper;
-        const alloc = self.document.allocator();
+        const alloc = self.q.docAlloc();
         const wraps = try cloneNodesForTargets(alloc, self.nodes.len, &.{wrapper});
         for (self.nodes, wraps) |n, clones| {
             if (n.node_type != .element and n.node_type != .document) continue;
@@ -1005,16 +1013,16 @@ pub const Selection = struct {
 
     /// Add nodes matching CSS selector to this selection.
     pub fn add(self: Selection, selector: []const u8) !Selection {
-        const alloc = self.document.allocator();
-        const parsed = try css_parser.parseSelector(alloc, selector);
+        const alloc = self.q.scratch();
+        const parsed = try self.q.compile(selector);
         const m = Matcher.init(alloc, parsed);
         return self.addMatcher(m);
     }
 
     /// Add nodes matching Matcher to this selection.
     pub fn addMatcher(self: Selection, m: Matcher) !Selection {
-        const alloc = self.document.allocator();
-        const root_slice = [_]*Node{self.document.root_node};
+        const alloc = self.q.scratch();
+        const root_slice = [_]*Node{self.q.doc.root_node};
         const found = try findWithMatcher(alloc, @constCast(root_slice[0..]), m);
         return self.addNodes(found);
     }
@@ -1026,7 +1034,7 @@ pub const Selection = struct {
 
     /// Add specific nodes to this selection.
     pub fn addNodes(self: Selection, extra_nodes: []*Node) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         const merged = try appendWithoutDuplicates(alloc, self.nodes, extra_nodes);
         return self.pushStack(merged);
     }
@@ -1051,18 +1059,18 @@ pub const Selection = struct {
     // Internal helpers.
 
     fn pushStack(self: Selection, new_nodes: []*Node) !Selection {
-        const alloc = self.document.allocator();
+        const alloc = self.q.scratch();
         const saved = try alloc.create(Selection);
         saved.* = self;
         return Selection{
             .nodes = new_nodes,
-            .document = self.document,
+            .q = self.q,
             .prev_sel = saved,
         };
     }
 
     fn filterAndPush(self: Selection, raw_nodes: []*Node, m: Matcher) !Selection {
-        const filtered = try filterWithMatcher(self.document.allocator(), raw_nodes, m);
+        const filtered = try filterWithMatcher(self.q.scratch(), raw_nodes, m);
         return self.pushStack(filtered);
     }
 };
@@ -1070,7 +1078,7 @@ pub const Selection = struct {
 /// Render the outer HTML of the first element.
 pub fn outerHtml(sel: Selection) ![]const u8 {
     if (sel.nodes.len == 0) return "";
-    return html_render.renderToString(sel.document.allocator(), sel.nodes[0]);
+    return html_render.renderToString(sel.q.scratch(), sel.nodes[0]);
 }
 
 /// Get the node name of the first element.
@@ -1087,41 +1095,74 @@ pub fn nodeName(sel: Selection) []const u8 {
 
 fn findWithMatcher(alloc: Allocator, nodes: []*Node, m: Matcher) ![]*Node {
     var result: std.ArrayList(*Node) = .empty;
-    var seen = std.AutoHashMap(*Node, void).init(alloc);
-    for (nodes) |n| {
-        var child = n.first_child;
-        while (child) |c| {
-            if (c.node_type == .element) {
-                try collectMatchesDedup(alloc, m, c, &result, &seen);
+
+    // A single root cannot yield duplicates: one pre-order walk visits every
+    // descendant exactly once. Only overlapping roots need the dedup set, and
+    // that is the uncommon case.
+    if (nodes.len == 1) {
+        var cur = tree.nextInPreorder(nodes[0], nodes[0]);
+        while (cur) |node| : (cur = tree.nextInPreorder(node, nodes[0])) {
+            if (node.node_type == .element and m.match(node)) {
+                try result.append(alloc, node);
             }
-            child = c.next_sibling;
+        }
+        return result.toOwnedSlice(alloc);
+    }
+
+    // Overlapping roots can reach the same node twice.
+    var marks: VisitMarks = .{};
+    defer marks.clear(alloc);
+    for (nodes) |root| {
+        var cur = tree.nextInPreorder(root, root);
+        while (cur) |node| : (cur = tree.nextInPreorder(node, root)) {
+            if (node.node_type != .element) continue;
+            if (!m.match(node)) continue;
+            if (try marks.seen(alloc, node)) continue;
+            try result.append(alloc, node);
         }
     }
     return result.toOwnedSlice(alloc);
 }
 
-fn collectMatchesDedup(alloc: Allocator, m: Matcher, node: *Node, result: *std.ArrayList(*Node), seen: *std.AutoHashMap(*Node, void)) !void {
-    if (m.match(node)) {
-        if (!seen.contains(node)) {
-            try seen.put(node, {});
-            try result.append(alloc, node);
-        }
-    }
-    var child = node.first_child;
-    while (child) |c| {
-        if (c.node_type == .element) {
-            try collectMatchesDedup(alloc, m, c, result, seen);
-        }
-        child = c.next_sibling;
-    }
-}
+/// Clone `source` once per destination. The clones become part of the
+/// document, so they are allocated from the document arena rather than the
+/// query's scratch space.
+/// Duplicate suppression that does not allocate a set.
+///
+/// Membership is a compare against a mark stored on the node itself, rather
+/// than a hash lookup into a map that -- in an arena -- was never released.
+/// Every mark set is cleared again before the pass returns, so `visit_mark` is
+/// zero everywhere outside one of these, and there is no stamp counter that
+/// could wrap.
+const VisitMarks = struct {
+    const mark: u32 = 1;
 
-fn cloneNodesForTargets(alloc: Allocator, target_count: usize, source: []const *Node) ![][]*Node {
-    const prepared = try alloc.alloc([]*Node, target_count);
+    marked: std.ArrayList(*Node) = .empty,
+
+    /// Returns true if `node` was already seen in this pass.
+    fn seen(self: *VisitMarks, alloc: Allocator, node: *Node) !bool {
+        if (node.visit_mark == mark) return true;
+        // Record the node before marking it. If this allocation fails the node
+        // must be left unmarked, or `clear` will not know to reset it and the
+        // stale mark would make the next pass drop it as a duplicate.
+        try self.marked.append(alloc, node);
+        node.visit_mark = mark;
+        return false;
+    }
+
+    /// Must run on every exit path, including errors.
+    fn clear(self: *VisitMarks, alloc: Allocator) void {
+        for (self.marked.items) |node| node.visit_mark = 0;
+        self.marked.deinit(alloc);
+    }
+};
+
+fn cloneNodesForTargets(dom: Allocator, target_count: usize, source: []const *Node) ![][]*Node {
+    const prepared = try dom.alloc([]*Node, target_count);
     for (prepared) |*clones| {
-        clones.* = try alloc.alloc(*Node, source.len);
+        clones.* = try dom.alloc(*Node, source.len);
         for (source, clones.*) |node, *clone| {
-            clone.* = try tree.cloneNode(alloc, node);
+            clone.* = try tree.cloneNode(dom, node);
         }
     }
     return prepared;
@@ -1133,8 +1174,10 @@ const FragmentContext = enum {
     parent_or_synthetic,
 };
 
-fn prepareFragments(alloc: Allocator, targets: []*Node, html: []const u8, mode: FragmentContext) ![][]*Node {
-    const prepared = try alloc.alloc([]*Node, targets.len);
+/// Parse `html` once per destination. The parsed nodes join the document,
+/// so they come from the document arena.
+fn prepareFragments(dom: Allocator, targets: []*Node, html: []const u8, mode: FragmentContext) ![][]*Node {
+    const prepared = try dom.alloc([]*Node, targets.len);
     for (targets, prepared) |target, *fragment| {
         const context = switch (mode) {
             .parent => target.parent orelse {
@@ -1148,12 +1191,12 @@ fn prepareFragments(alloc: Allocator, targets: []*Node, html: []const u8, mode: 
                 continue;
             },
             .parent_or_synthetic => target.parent orelse blk: {
-                const synthetic = try alloc.create(Node);
+                const synthetic = try dom.create(Node);
                 synthetic.* = .{ .node_type = .element, .data = "div" };
                 break :blk synthetic;
             },
         };
-        fragment.* = try html_parser.parseFragment(alloc, html, context);
+        fragment.* = try html_parser.parseFragment(dom, html, context);
     }
     return prepared;
 }
@@ -1178,7 +1221,8 @@ const SiblingType = enum {
 
 fn getChildrenNodes(alloc: Allocator, nodes: []*Node, st: SiblingType) ![]*Node {
     var result: std.ArrayList(*Node) = .empty;
-    var seen = std.AutoHashMap(*Node, void).init(alloc);
+    var marks: VisitMarks = .{};
+    defer marks.clear(alloc);
     for (nodes) |n| {
         var child = n.first_child;
         while (child) |c| {
@@ -1186,10 +1230,7 @@ fn getChildrenNodes(alloc: Allocator, nodes: []*Node, st: SiblingType) ![]*Node 
                 .all_including_non_elements => true,
                 else => c.node_type == .element,
             };
-            if (include and !seen.contains(c)) {
-                try seen.put(c, {});
-                try result.append(alloc, c);
-            }
+            if (include and !try marks.seen(alloc, c)) try result.append(alloc, c);
             child = c.next_sibling;
         }
     }
@@ -1198,11 +1239,11 @@ fn getChildrenNodes(alloc: Allocator, nodes: []*Node, st: SiblingType) ![]*Node 
 
 fn getParentNodes(alloc: Allocator, nodes: []*Node) ![]*Node {
     var result: std.ArrayList(*Node) = .empty;
-    var seen = std.AutoHashMap(*Node, void).init(alloc);
+    var marks: VisitMarks = .{};
+    defer marks.clear(alloc);
     for (nodes) |n| {
         if (n.parent) |p| {
-            if (p.node_type == .element and !seen.contains(p)) {
-                try seen.put(p, {});
+            if (p.node_type == .element and !try marks.seen(alloc, p)) {
                 try result.append(alloc, p);
             }
         }
@@ -1212,7 +1253,8 @@ fn getParentNodes(alloc: Allocator, nodes: []*Node) ![]*Node {
 
 fn getParentsNodes(alloc: Allocator, nodes: []*Node, until_matcher: ?Matcher, until_nodes: ?[]*Node) ![]*Node {
     var result: std.ArrayList(*Node) = .empty;
-    var seen = std.AutoHashMap(*Node, void).init(alloc);
+    var marks: VisitMarks = .{};
+    defer marks.clear(alloc);
     for (nodes) |n| {
         var p = n.parent;
         while (p) |parent| {
@@ -1222,8 +1264,7 @@ fn getParentsNodes(alloc: Allocator, nodes: []*Node, until_matcher: ?Matcher, un
             if (until_nodes) |un| {
                 if (isInSlice(un, parent)) break;
             }
-            if (parent.node_type == .element and !seen.contains(parent)) {
-                try seen.put(parent, {});
+            if (parent.node_type == .element and !try marks.seen(alloc, parent)) {
                 try result.append(alloc, parent);
             }
             p = parent.parent;
@@ -1234,14 +1275,12 @@ fn getParentsNodes(alloc: Allocator, nodes: []*Node, until_matcher: ?Matcher, un
 
 fn getSiblingNodes(alloc: Allocator, nodes: []*Node, st: SiblingType, until_matcher: ?Matcher, until_nodes: ?[]*Node) ![]*Node {
     var result: std.ArrayList(*Node) = .empty;
-    var seen = std.AutoHashMap(*Node, void).init(alloc);
+    var marks: VisitMarks = .{};
+    defer marks.clear(alloc);
     for (nodes) |n| {
         const siblings = try getNodeSiblings(alloc, n, st, until_matcher, until_nodes);
         for (siblings) |s| {
-            if (!seen.contains(s)) {
-                try seen.put(s, {});
-                try result.append(alloc, s);
-            }
+            if (!try marks.seen(alloc, s)) try result.append(alloc, s);
         }
     }
     return result.toOwnedSlice(alloc);
@@ -1331,9 +1370,9 @@ fn matchesUntil(node: *Node, until_matcher: ?Matcher, until_nodes: ?[]*Node) boo
 
 fn winnow(sel: Selection, m: Matcher, keep: bool) ![]*Node {
     if (keep) {
-        return filterWithMatcher(sel.document.allocator(), sel.nodes, m);
+        return filterWithMatcher(sel.q.scratch(), sel.nodes, m);
     }
-    const alloc = sel.document.allocator();
+    const alloc = sel.q.scratch();
     var result: std.ArrayList(*Node) = .empty;
     for (sel.nodes) |n| {
         if (!m.match(n)) try result.append(alloc, n);
@@ -1350,17 +1389,17 @@ fn filterWithMatcher(alloc: Allocator, nodes: []*Node, m: Matcher) ![]*Node {
 }
 
 fn winnowFn(sel: Selection, f: *const fn (usize, Selection) bool, keep: bool) ![]*Node {
-    const alloc = sel.document.allocator();
+    const alloc = sel.q.scratch();
     var result: std.ArrayList(*Node) = .empty;
     for (sel.nodes, 0..) |n, i| {
-        const matches = f(i, Selection.initFromSlice(sel.nodes[i .. i + 1], sel.document));
+        const matches = f(i, Selection.initFromSlice(sel.nodes[i .. i + 1], sel.q));
         if (matches == keep) try result.append(alloc, n);
     }
     return result.toOwnedSlice(alloc);
 }
 
 fn winnowNodes(sel: Selection, target_nodes: []*Node, keep: bool) ![]*Node {
-    const alloc = sel.document.allocator();
+    const alloc = sel.q.scratch();
     var result: std.ArrayList(*Node) = .empty;
     for (sel.nodes) |n| {
         const in_targets = isInSlice(target_nodes, n);
@@ -1372,13 +1411,11 @@ fn winnowNodes(sel: Selection, target_nodes: []*Node, keep: bool) ![]*Node {
 fn appendWithoutDuplicates(alloc: Allocator, target: []*Node, new_nodes: []*Node) ![]*Node {
     var result: std.ArrayList(*Node) = .empty;
     try result.appendSlice(alloc, target);
-    var seen = std.AutoHashMap(*Node, void).init(alloc);
-    for (target) |n| try seen.put(n, {});
+    var marks: VisitMarks = .{};
+    defer marks.clear(alloc);
+    for (target) |n| _ = try marks.seen(alloc, n);
     for (new_nodes) |n| {
-        if (!seen.contains(n)) {
-            try seen.put(n, {});
-            try result.append(alloc, n);
-        }
+        if (!try marks.seen(alloc, n)) try result.append(alloc, n);
     }
     return result.toOwnedSlice(alloc);
 }
@@ -1414,13 +1451,9 @@ fn nodeContains(container: *const Node, contained: *const Node) bool {
 }
 
 fn hasDescendantMatch(node: *const Node, m: Matcher) bool {
-    var child = node.first_child;
-    while (child) |c| {
-        if (c.node_type == .element) {
-            if (m.match(c)) return true;
-            if (hasDescendantMatch(c, m)) return true;
-        }
-        child = c.next_sibling;
+    var cur = tree.nextInPreorderConst(node, node);
+    while (cur) |current| : (cur = tree.nextInPreorderConst(current, node)) {
+        if (current.node_type == .element and m.match(current)) return true;
     }
     return false;
 }
@@ -1430,10 +1463,9 @@ fn collectText(alloc: Allocator, node: *const Node, buf: *std.ArrayList(u8)) !vo
         try buf.appendSlice(alloc, node.data);
         return;
     }
-    var child = node.first_child;
-    while (child) |c| {
-        try collectText(alloc, c, buf);
-        child = c.next_sibling;
+    var cur = tree.nextInPreorderConst(node, node);
+    while (cur) |current| : (cur = tree.nextInPreorderConst(current, node)) {
+        if (current.node_type == .text) try buf.appendSlice(alloc, current.data);
     }
 }
 
@@ -1526,14 +1558,16 @@ const PendingAttribute = union(enum) {
     },
 };
 
-fn prepareSetAttribute(alloc: Allocator, node: *Node, key: []const u8, val: []const u8) !PendingAttribute {
-    const owned_val = try alloc.dupe(u8, val);
+/// Attribute keys and values are stored on the node, so they outlive the
+/// query and come from the document arena.
+fn prepareSetAttribute(dom: Allocator, node: *Node, key: []const u8, val: []const u8) !PendingAttribute {
+    const owned_val = try dom.dupe(u8, val);
     if (findAttributeIndex(node, key)) |index| {
         return .{ .set_existing = .{ .node = node, .index = index, .value = owned_val } };
     }
 
-    const owned_key = try alloc.dupe(u8, key);
-    const new_attrs = try alloc.alloc(Attribute, node.attr.len + 1);
+    const owned_key = try dom.dupe(u8, key);
+    const new_attrs = try dom.alloc(Attribute, node.attr.len + 1);
     @memcpy(new_attrs[0..node.attr.len], node.attr);
     new_attrs[node.attr.len] = .{ .key = owned_key, .val = owned_val };
     return .{ .set_new = .{ .node = node, .attributes = new_attrs } };
@@ -1566,75 +1600,93 @@ fn removeNodeAttrAt(node: *Node, index: usize) void {
 }
 
 test "Selection find" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<div><p>Hello</p><p>World</p></div>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<div><p>Hello</p><p>World</p></div>");
     defer doc.deinit();
-    const sel = try doc.find("p");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const sel = try q.find("p");
     try std.testing.expect(sel.len() == 2);
 }
 
 test "Selection children" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<div><span>A</span><span>B</span></div>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<div><span>A</span><span>B</span></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     const spans = try div.children();
     try std.testing.expect(spans.len() == 2);
 }
 
 test "Selection parent" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<div><p>test</p></div>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<div><p>test</p></div>");
     defer doc.deinit();
-    const p = try doc.find("p");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const p = try q.find("p");
     const par = try p.parent();
     try std.testing.expect(par.len() == 1);
     try std.testing.expectEqualStrings("div", par.nodes[0].data);
 }
 
 test "Selection attr" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<a href=\"/test\">link</a>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<a href=\"/test\">link</a>");
     defer doc.deinit();
-    const a = try doc.find("a");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const a = try q.find("a");
     try std.testing.expectEqualStrings("/test", a.attr("href").?);
 }
 
 test "Selection text" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<div>Hello <span>World</span></div>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<div>Hello <span>World</span></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     const t = try div.text();
     try std.testing.expect(std.mem.indexOf(u8, t, "Hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, t, "World") != null);
 }
 
 test "Selection hasClass" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<div class=\"foo bar\">test</div>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<div class=\"foo bar\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try std.testing.expect(div.hasClass("foo"));
     try std.testing.expect(div.hasClass("bar"));
     try std.testing.expect(!div.hasClass("baz"));
 }
 
 test "Selection first and last" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<ul><li>1</li><li>2</li><li>3</li></ul>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<ul><li>1</li><li>2</li><li>3</li></ul>");
     defer doc.deinit();
-    const lis = try doc.find("li");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const lis = try q.find("li");
     try std.testing.expect(lis.len() == 3);
     try std.testing.expect((try lis.first()).len() == 1);
     try std.testing.expect((try lis.last()).len() == 1);
 }
 
 test "Selection is" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<div class=\"active\">test</div>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<div class=\"active\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try std.testing.expect(try div.is(".active"));
     try std.testing.expect(!try div.is(".inactive"));
 }
 
 test "Selection empty selection" {
-    var doc = try Document.initFromSlice(std.testing.allocator, "<div></div>");
+    var doc = try @import("document.zig").Document.initFromSlice(std.testing.allocator, "<div></div>");
     defer doc.deinit();
-    const nonexistent = try doc.find("span");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const nonexistent = try q.find("span");
     try std.testing.expect(nonexistent.len() == 0);
     try std.testing.expect(nonexistent.attr("id") == null);
     try std.testing.expect(!nonexistent.hasClass("foo"));

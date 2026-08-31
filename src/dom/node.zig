@@ -25,6 +25,13 @@ pub const Node = struct {
     prev_sibling: ?*Node = null,
     next_sibling: ?*Node = null,
 
+    /// Scratch mark used to suppress duplicates while collecting nodes.
+    ///
+    /// Lives in what was tail padding, so it costs nothing: `@sizeOf(Node)` is
+    /// 96 either way. Always zero outside a single collection pass -- see
+    /// `VisitMarks` in selection.zig, which clears every mark it sets.
+    visit_mark: u32 = 0,
+
     /// Attribute lookup by key. Returns the value if found.
     pub fn getAttr(self: *const Node, key: []const u8) ?[]const u8 {
         for (self.attr) |a| {
@@ -74,6 +81,12 @@ pub const Node = struct {
         return d;
     }
 };
+
+test "visit_mark fits in existing padding" {
+    // If this ever fails, adding the field started costing real memory and the
+    // trade-off needs revisiting.
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(Node));
+}
 
 test "node attribute lookup" {
     const attrs = [_]Attribute{

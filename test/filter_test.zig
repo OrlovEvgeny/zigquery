@@ -5,7 +5,9 @@ const helper = @import("test_helper.zig");
 test "filter by selector" {
     var doc = try helper.parseDoc("<div><p class=\"a\">1</p><p class=\"b\">2</p><p class=\"a\">3</p></div>");
     defer doc.deinit();
-    const ps = try doc.find("p");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const ps = try q.find("p");
     try std.testing.expect(ps.len() == 3);
     const filtered = try ps.filter(".a");
     try std.testing.expect(filtered.len() == 2);
@@ -14,7 +16,9 @@ test "filter by selector" {
 test "not by selector" {
     var doc = try helper.parseDoc("<div><p class=\"a\">1</p><p class=\"b\">2</p><p class=\"a\">3</p></div>");
     defer doc.deinit();
-    const ps = try doc.find("p");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const ps = try q.find("p");
     const not_a = try ps.not(".a");
     try std.testing.expect(not_a.len() == 1);
 }
@@ -22,7 +26,9 @@ test "not by selector" {
 test "has" {
     var doc = try helper.parseDoc("<div><p><span>yes</span></p></div><div><p>no span</p></div>");
     defer doc.deinit();
-    const divs = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const divs = try q.find("div");
     const with_span = try divs.has("span");
     try std.testing.expect(with_span.len() == 1);
 }
@@ -30,7 +36,9 @@ test "has" {
 test "is" {
     var doc = try helper.parseDoc("<div class=\"active\"><p>test</p></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try std.testing.expect(try div.is(".active"));
     try std.testing.expect(!try div.is(".inactive"));
 }
@@ -38,8 +46,10 @@ test "is" {
 test "filter on page2.html" {
     var doc = try zq.Document.initFromSlice(std.testing.allocator, helper.page2_html);
     defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
 
-    const rows = try doc.find(".row");
+    const rows = try q.find(".row");
     try std.testing.expect(rows.len() > 0);
 
     const odd = try rows.filter(".odd");
@@ -52,8 +62,10 @@ test "filter on page2.html" {
 test "intersection" {
     var doc = try helper.parseDoc("<div><p class=\"a\">1</p><p class=\"b\">2</p></div>");
     defer doc.deinit();
-    const ps = try doc.find("p");
-    const a = try doc.find(".a");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const ps = try q.find("p");
+    const a = try q.find(".a");
     const inter = try ps.intersection(a);
     try std.testing.expect(inter.len() == 1);
 }
@@ -61,7 +73,9 @@ test "intersection" {
 test "end returns previous" {
     var doc = try helper.parseDoc("<div><p>A</p><span>B</span></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     const children = try div.children();
     const filtered = try children.filter("p");
     try std.testing.expect(filtered.len() == 1);

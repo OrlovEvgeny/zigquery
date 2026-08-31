@@ -5,7 +5,9 @@ const helper = @import("test_helper.zig");
 fn setAttrWithFailures(allocator: std.mem.Allocator) !void {
     var doc = try zq.Document.initFromSlice(allocator, "<div id=first></div><div id=second></div>");
     defer doc.deinit();
-    const divs = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const divs = try q.find("div");
 
     divs.setAttr("id", "updated") catch |err| {
         try std.testing.expectEqualStrings("first", divs.nodes[0].getAttr("id").?);
@@ -20,7 +22,9 @@ fn setAttrWithFailures(allocator: std.mem.Allocator) !void {
 test "attr" {
     var doc = try helper.parseDoc("<a href=\"/test\" id=\"link1\">click</a>");
     defer doc.deinit();
-    const a = try doc.find("a");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const a = try q.find("a");
     try std.testing.expectEqualStrings("/test", a.attr("href").?);
     try std.testing.expectEqualStrings("link1", a.attr("id").?);
     try std.testing.expect(a.attr("class") == null);
@@ -29,14 +33,18 @@ test "attr" {
 test "attrOr" {
     var doc = try helper.parseDoc("<div>test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try std.testing.expectEqualStrings("default", div.attrOr("class", "default"));
 }
 
 test "setAttr" {
     var doc = try helper.parseDoc("<div id=\"original\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try div.setAttr("id", "modified");
     try std.testing.expectEqualStrings("modified", div.attr("id").?);
 }
@@ -44,7 +52,9 @@ test "setAttr" {
 test "setAttr new attribute" {
     var doc = try helper.parseDoc("<div>test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try div.setAttr("data-x", "value");
     try std.testing.expectEqualStrings("value", div.attr("data-x").?);
 }
@@ -52,7 +62,9 @@ test "setAttr new attribute" {
 test "setAttr owns caller buffers" {
     var doc = try helper.parseDoc("<div></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
 
     const name = try std.testing.allocator.dupe(u8, "data-owned");
     const value = try std.testing.allocator.dupe(u8, "yes");
@@ -70,7 +82,9 @@ test "setAttr is atomic on allocation failure" {
 test "removeClass removes duplicate class tokens" {
     var doc = try helper.parseDoc("<div class='foo foo bar'></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
 
     try div.removeClass("foo");
     try std.testing.expectEqualStrings("bar", div.attr("class").?);
@@ -79,7 +93,9 @@ test "removeClass removes duplicate class tokens" {
 test "removeAttr" {
     var doc = try helper.parseDoc("<div id=\"main\" class=\"foo\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     div.removeAttr("class");
     try std.testing.expect(div.attr("class") == null);
     try std.testing.expect(div.attr("id") != null);
@@ -88,7 +104,9 @@ test "removeAttr" {
 test "hasClass" {
     var doc = try helper.parseDoc("<div class=\"foo bar baz\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try std.testing.expect(div.hasClass("foo"));
     try std.testing.expect(div.hasClass("bar"));
     try std.testing.expect(div.hasClass("baz"));
@@ -98,7 +116,9 @@ test "hasClass" {
 test "addClass" {
     var doc = try helper.parseDoc("<div class=\"foo\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try div.addClass("bar");
     try std.testing.expect(div.hasClass("foo"));
     try std.testing.expect(div.hasClass("bar"));
@@ -107,7 +127,9 @@ test "addClass" {
 test "addClass does not duplicate" {
     var doc = try helper.parseDoc("<div class=\"foo\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try div.addClass("foo");
     const class_val = div.attr("class").?;
     // Should not have "foo" twice.
@@ -122,7 +144,9 @@ test "addClass does not duplicate" {
 test "removeClass" {
     var doc = try helper.parseDoc("<div class=\"foo bar baz\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try div.removeClass("bar");
     try std.testing.expect(div.hasClass("foo"));
     try std.testing.expect(!div.hasClass("bar"));
@@ -132,7 +156,9 @@ test "removeClass" {
 test "removeClass all" {
     var doc = try helper.parseDoc("<div class=\"foo bar\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try div.removeClass("");
     try std.testing.expect(div.attr("class") == null);
 }
@@ -140,7 +166,9 @@ test "removeClass all" {
 test "toggleClass" {
     var doc = try helper.parseDoc("<div class=\"foo\">test</div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     try div.toggleClass("foo");
     try std.testing.expect(!div.hasClass("foo"));
     try div.toggleClass("foo");
@@ -150,7 +178,9 @@ test "toggleClass" {
 test "text" {
     var doc = try helper.parseDoc("<div>Hello <span>World</span></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     const t = try div.text();
     try std.testing.expect(std.mem.indexOf(u8, t, "Hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, t, "World") != null);
@@ -159,7 +189,9 @@ test "text" {
 test "html" {
     var doc = try helper.parseDoc("<div><p>test</p></div>");
     defer doc.deinit();
-    const div = try doc.find("div");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const div = try q.find("div");
     const h = try div.html();
     try std.testing.expect(std.mem.indexOf(u8, h, "<p>") != null);
     try std.testing.expect(std.mem.indexOf(u8, h, "test") != null);
@@ -168,7 +200,9 @@ test "html" {
 test "page.html attr access" {
     var doc = try zq.Document.initFromSlice(std.testing.allocator, helper.page_html);
     defer doc.deinit();
-    const html_el = try doc.find("html");
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const html_el = try q.find("html");
     try std.testing.expect(html_el.len() == 1);
     try std.testing.expectEqualStrings("en", html_el.attr("lang").?);
 }

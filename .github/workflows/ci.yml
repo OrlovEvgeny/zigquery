@@ -25,7 +25,7 @@ jobs:
           version: 0.16.0
 
       - name: Check formatting
-        run: zig fmt --check src/ test/
+        run: zig fmt --check src/ test/ bench/
 
   build-and-test:
     needs: lint
@@ -74,3 +74,26 @@ jobs:
       # tests without emitting a binary to keep source compatibility covered.
       - name: Semantic compatibility check
         run: zig test src/root.zig -fno-emit-bin
+
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      # Wall-clock numbers are too noisy on shared runners to gate on, so this
+      # checks the two things that are not: no benchmark may retain memory in
+      # the document arena, and no workload may scale superlinearly.
+      #
+      # Run at full corpus size deliberately. The --quick corpora are small
+      # enough that fixed costs dominate and every workload measures as linear,
+      # which would make this gate useless.
+      - name: Complexity and retention gates
+        run: zig build bench -- --strict --scaling --filter find/

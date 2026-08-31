@@ -13,13 +13,15 @@ test "allocating selection APIs propagate errors" {
         "<main><div><p>A</p><span>B</span></div><div><p>C</p></div></main>",
     );
     defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
 
     var compiled = try zq.CompiledSelector.init(std.testing.allocator, "p");
     defer compiled.deinit();
-    const matcher = compiled.matcher(doc.allocator());
+    const matcher = compiled.matcher(doc.domAllocator());
 
-    const divs = try doc.find("div");
-    const paragraphs = try doc.find("p");
+    const divs = try q.find("div");
+    const paragraphs = try q.find("p");
     _ = try divs.findMatcher(matcher);
     _ = try divs.findSelection(paragraphs);
     _ = try divs.findNodes(paragraphs.nodes);
@@ -60,11 +62,15 @@ test "allocating selection APIs propagate errors" {
 test "node mutation APIs compile and preserve invariants" {
     var doc = try zq.Document.initFromSlice(std.testing.allocator, "<main><div><p>A</p></div></main>");
     defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
     var source = try zq.Document.initFromSlice(std.testing.allocator, "<i>x</i>");
     defer source.deinit();
+    var q_source = source.query(std.testing.allocator);
+    defer q_source.deinit();
 
-    const empty = try doc.find("missing");
-    const source_nodes = try source.find("i");
+    const empty = try q.find("missing");
+    const source_nodes = try q_source.find("i");
     try empty.afterNodes(source_nodes.nodes);
     try empty.beforeNodes(source_nodes.nodes);
     try empty.appendNodes(source_nodes.nodes);
@@ -78,5 +84,5 @@ test "node mutation APIs compile and preserve invariants" {
 }
 
 fn compiledMatcher(doc: *zq.Document) zq.Matcher {
-    return zq.Matcher.init(doc.allocator(), &universal_selector);
+    return zq.Matcher.init(doc.domAllocator(), &universal_selector);
 }

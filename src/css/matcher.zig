@@ -5,6 +5,7 @@ const Selector = sel_mod.Selector;
 const AttrOp = sel_mod.AttrOp;
 const CombinatorKind = sel_mod.CombinatorKind;
 const PseudoClassKind = sel_mod.PseudoClassKind;
+const tree = @import("../dom/tree.zig");
 const node_mod = @import("../dom/node.zig");
 const Node = node_mod.Node;
 const NodeType = node_mod.NodeType;
@@ -44,15 +45,11 @@ pub const Matcher = struct {
 };
 
 fn collectMatches(selector: *const Selector, node: *const Node, result: *std.ArrayList(*Node), allocator: Allocator) !void {
-    var child = node.first_child;
-    while (child) |c| {
-        if (c.node_type == .element) {
-            if (matchNode(selector, c)) {
-                try result.append(allocator, @constCast(c));
-            }
-            try collectMatches(selector, c, result, allocator);
+    var cur = tree.nextInPreorderConst(node, node);
+    while (cur) |current| : (cur = tree.nextInPreorderConst(current, node)) {
+        if (current.node_type == .element and matchNode(selector, current)) {
+            try result.append(allocator, @constCast(current));
         }
-        child = c.next_sibling;
     }
 }
 
@@ -159,12 +156,17 @@ fn eqlMaybeCI(a: []const u8, b: []const u8, case_insensitive: bool) bool {
 
 fn matchPseudoClass(node: *const Node, pc: sel_mod.PseudoClassSelector) bool {
     return switch (pc.kind) {
-        .first_child => isNthChild(node, 0, 1, false),
-        .last_child => isNthChild(node, 0, 1, true),
-        .only_child => isNthChild(node, 0, 1, false) and isNthChild(node, 0, 1, true),
-        .first_of_type => isNthOfType(node, 0, 1, false),
-        .last_of_type => isNthOfType(node, 0, 1, true),
-        .only_of_type => isNthOfType(node, 0, 1, false) and isNthOfType(node, 0, 1, true),
+        // The positional pseudo-classes below are answered by looking at the
+        // immediate neighbours rather than by counting the whole sibling list.
+        // Counting made matching a wide parent quadratic in its child count.
+        .first_child => siblingElement(node, .previous, null) == null,
+        .last_child => siblingElement(node, .next, null) == null,
+        .only_child => siblingElement(node, .previous, null) == null and
+            siblingElement(node, .next, null) == null,
+        .first_of_type => siblingElement(node, .previous, node.data) == null,
+        .last_of_type => siblingElement(node, .next, node.data) == null,
+        .only_of_type => siblingElement(node, .previous, node.data) == null and
+            siblingElement(node, .next, node.data) == null,
         .empty => nodeIsEmpty(node),
         .root => node.parent != null and (node.parent.?.node_type == .document),
         .nth_child => isNthChild(node, pc.a, pc.b, false),
@@ -178,52 +180,189 @@ fn matchPseudoClass(node: *const Node, pc: sel_mod.PseudoClassSelector) bool {
     };
 }
 
-fn isNthChild(node: *const Node, a: i32, b: i32, from_end: bool) bool {
-    const parent = node.parent orelse return false;
-    var index: i32 = 0;
+const Direction = enum { previous, next };
 
-    if (from_end) {
-        var c = parent.last_child;
-        while (c) |child| : (c = child.prev_sibling) {
-            if (child.node_type == .element) {
-                index += 1;
-                if (child == @as(*const Node, node)) return matchesNth(a, b, index);
+/// Nearest element sibling in `dir`, optionally restricted to a tag name.
+/// Returns null when there is none.
+fn siblingElement(node: *const Node, comptime dir: Direction, of_type: ?[]const u8) ?*const Node {
+    var cur = switch (dir) {
+        .previous => node.prev_sibling,
+        .next => node.next_sibling,
+    };
+    while (cur) |current| {
+        if (current.node_type == .element) {
+            if (of_type) |tag| {
+                if (std.mem.eql(u8, current.data, tag)) return current;
+            } else {
+                return current;
             }
         }
-    } else {
-        var c = parent.first_child;
-        while (c) |child| : (c = child.next_sibling) {
-            if (child.node_type == .element) {
-                index += 1;
-                if (child == @as(*const Node, node)) return matchesNth(a, b, index);
-            }
+        cur = switch (dir) {
+            .previous => current.prev_sibling,
+            .next => current.next_sibling,
+        };
+    }
+    return null;
+}
+
+/// Remembers where the last position query landed, so walking a sibling list in
+/// document order costs one step per element instead of a rescan.
+///
+/// Both memos are validated against `tree.structure_generation`, so any
+/// insertion or removal anywhere invalidates them. That is deliberately
+/// conservative: a stale position would silently produce wrong matches.
+const PositionMemo = struct {
+    generation: u64 = std.math.maxInt(u64),
+    parent: ?*const Node = null,
+    node: ?*const Node = null,
+    index: i32 = 0,
+    of_type: ?[]const u8 = null,
+};
+
+const CountMemo = struct {
+    generation: u64 = std.math.maxInt(u64),
+    parent: ?*const Node = null,
+    of_type: ?[]const u8 = null,
+    count: i32 = 0,
+};
+
+/// A pre-order walk descends into each child's subtree before reaching the
+/// next sibling, so a single memo slot is evicted by the nested subtree and
+/// never hits. Enough slots to cover the parents along the current path -- plus
+/// the ones just finished -- keeps the sibling walk O(1) amortized.
+const memo_slots = 128;
+
+threadlocal var position_memo: [memo_slots]PositionMemo = @splat(.{});
+threadlocal var count_memo: [memo_slots]CountMemo = @splat(.{});
+
+fn memoSlot(parent: *const Node) usize {
+    // Nodes come from an arena, so consecutive ones sit a fixed stride apart
+    // and the low bits are alignment padding. Mix before masking, or whole
+    // runs of siblings land in the same slot.
+    const mixed = @as(u64, @intFromPtr(parent) >> 3) *% 0x9E3779B97F4A7C15;
+    return @intCast((mixed >> 32) % memo_slots);
+}
+
+fn sameOfType(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null) return b == null;
+    if (b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
+/// 1-based position of `node` among its element siblings, counting from the
+/// start, optionally restricted to siblings sharing `of_type`.
+///
+/// Counting from scratch on every call made matching a parent with S children
+/// cost O(S^2): `:nth-child(2n+1)` over 100k siblings took 31 seconds.
+fn elementPosition(node: *const Node, of_type: ?[]const u8) ?i32 {
+    const parent = node.parent orelse return null;
+    const slot = &position_memo[memoSlot(parent)];
+    const memo_valid = slot.generation == tree.structure_generation and
+        slot.parent == parent and
+        sameOfType(slot.of_type, of_type);
+
+    // Walk back toward the start, but stop as soon as we reach the sibling
+    // whose position we worked out last time under this parent. Matching moves
+    // forward through a sibling list, so that is usually only a step or two --
+    // whereas restarting from the first child every time is what made this
+    // O(S^2) for a parent with S children.
+    var index: i32 = 0;
+    var steps: i32 = 0;
+    var cur = siblingElement(node, .previous, of_type);
+    while (cur) |current| : (cur = siblingElement(current, .previous, of_type)) {
+        steps += 1;
+        if (memo_valid and slot.node == current) {
+            index = slot.index + steps;
+            break;
         }
     }
-    return false;
+    if (index == 0) index = steps + 1;
+
+    slot.* = .{
+        .generation = tree.structure_generation,
+        .parent = parent,
+        .node = node,
+        .index = index,
+        .of_type = of_type,
+    };
+    return index;
+}
+
+/// How many element children `parent` has, optionally restricted by tag.
+fn elementCount(parent: *const Node, of_type: ?[]const u8) i32 {
+    const slot = &count_memo[memoSlot(parent)];
+    if (slot.generation == tree.structure_generation and
+        slot.parent == parent and
+        sameOfType(slot.of_type, of_type))
+    {
+        return slot.count;
+    }
+
+    var count: i32 = 0;
+    var child = parent.first_child;
+    while (child) |current| : (child = current.next_sibling) {
+        if (current.node_type != .element) continue;
+        if (of_type) |tag| {
+            if (!std.mem.eql(u8, current.data, tag)) continue;
+        }
+        count += 1;
+    }
+
+    slot.* = .{
+        .generation = tree.structure_generation,
+        .parent = parent,
+        .of_type = of_type,
+        .count = count,
+    };
+    return count;
+}
+
+/// Position counted from whichever end the selector asks for.
+fn positionFor(node: *const Node, from_end: bool, of_type: ?[]const u8) ?i32 {
+    const forward = elementPosition(node, of_type) orelse return null;
+    if (!from_end) return forward;
+    // Counting backward from a forward position avoids a second memo that
+    // would never hit: matching walks siblings forward, not backward.
+    return elementCount(node.parent.?, of_type) - forward + 1;
+}
+
+fn isNthChild(node: *const Node, a: i32, b: i32, from_end: bool) bool {
+    // With no step, only position `b` can match, so walking more than `b`
+    // siblings is wasted work. Anything at or before position `b` is found
+    // within `b` steps; anything after it is rejected just as quickly.
+    if (a == 0) return isAtPosition(node, b, from_end, null);
+    const index = positionFor(node, from_end, null) orelse return false;
+    return matchesNth(a, b, index);
 }
 
 fn isNthOfType(node: *const Node, a: i32, b: i32, from_end: bool) bool {
-    const parent = node.parent orelse return false;
-    var index: i32 = 0;
+    if (a == 0) return isAtPosition(node, b, from_end, node.data);
+    const index = positionFor(node, from_end, node.data) orelse return false;
+    return matchesNth(a, b, index);
+}
 
-    if (from_end) {
-        var c = parent.last_child;
-        while (c) |child| : (c = child.prev_sibling) {
-            if (child.node_type == .element and std.mem.eql(u8, child.data, node.data)) {
-                index += 1;
-                if (child == @as(*const Node, node)) return matchesNth(a, b, index);
-            }
-        }
-    } else {
-        var c = parent.first_child;
-        while (c) |child| : (c = child.next_sibling) {
-            if (child.node_type == .element and std.mem.eql(u8, child.data, node.data)) {
-                index += 1;
-                if (child == @as(*const Node, node)) return matchesNth(a, b, index);
-            }
-        }
+/// Is `node` exactly at 1-based position `b` among its element siblings
+/// (counting from the end when `from_end`), optionally among siblings sharing
+/// its tag name? Costs at most `b` steps rather than a full sibling scan.
+fn isAtPosition(node: *const Node, b: i32, from_end: bool, of_type: ?[]const u8) bool {
+    if (b <= 0) return false;
+    if (node.parent == null) return false;
+
+    var remaining = b - 1;
+    var cur: ?*const Node = node;
+    while (remaining > 0) : (remaining -= 1) {
+        cur = if (from_end)
+            siblingElement(cur.?, .next, of_type)
+        else
+            siblingElement(cur.?, .previous, of_type);
+        if (cur == null) return false;
     }
-    return false;
+    // `cur` is now `b - 1` steps toward the relevant end; the node is at
+    // position `b` exactly when nothing lies beyond it.
+    return if (from_end)
+        siblingElement(cur.?, .next, of_type) == null
+    else
+        siblingElement(cur.?, .previous, of_type) == null;
 }
 
 fn matchesNth(a: i32, b: i32, index: i32) bool {
@@ -304,19 +443,60 @@ fn matchHas(node: *const Node, inner: *const Selector) bool {
     };
 }
 
+/// Evaluate a `:has()` relative selector against `node`.
+///
+/// The candidate set is scoped by the leading combinator rather than searched
+/// for across the whole document:
+///
+///   * `:has(a)` / `:has(> a)` -- every match lies inside the anchor's own
+///     subtree. Sibling combinators inside the relative selector move between
+///     children of the anchor, so they cannot escape it either.
+///   * `:has(+ a)` / `:has(~ a)` -- the match lies in a following sibling or
+///     one of their subtrees, so those are scanned instead.
+///
+/// Scanning the entire document per anchor, as this used to, makes `:has()`
+/// quadratic in document size: about a second per call on a 2 MB page, against
+/// well under a millisecond for every other selector.
 fn matchRelative(node: *const Node, relative: sel_mod.RelativeSelector) bool {
-    var root = node;
-    while (root.parent) |parent| root = parent;
-    return anyRelativeCandidate(node, relative.kind, relative.selector, root);
+    return switch (relative.kind) {
+        .descendant, .child => anyCandidateInSubtree(node, relative, node),
+        .next_sibling, .subsequent_sibling => blk: {
+            // Both sibling combinators scan every following sibling, not just
+            // the immediate one: `:has(+ p ~ span)` anchors `p` to the next
+            // sibling but matches `span`, a later sibling still. The
+            // "immediate" versus "any" distinction is enforced where it
+            // belongs, by `matchesLeadingRelation` on the leftmost compound.
+            var sibling = nextElementSibling(node);
+            while (sibling) |current| : (sibling = nextElementSibling(current)) {
+                if (matchRelativeCandidate(node, relative.kind, relative.selector, current)) break :blk true;
+                if (anyCandidateInSubtree(node, relative, current)) break :blk true;
+            }
+            break :blk false;
+        },
+    };
 }
 
-fn anyRelativeCandidate(anchor: *const Node, leading: CombinatorKind, selector: *const Selector, root: *const Node) bool {
-    if (root.node_type == .element and matchRelativeCandidate(anchor, leading, selector, root)) return true;
-    var child = root.first_child;
-    while (child) |current| : (child = current.next_sibling) {
-        if (anyRelativeCandidate(anchor, leading, selector, current)) return true;
+/// Test every strict descendant of `root` as a candidate. Iterative, so a
+/// deeply nested document cannot overflow the stack.
+fn anyCandidateInSubtree(
+    anchor: *const Node,
+    relative: sel_mod.RelativeSelector,
+    root: *const Node,
+) bool {
+    var cur: ?*const Node = root.first_child;
+    while (cur) |current| : (cur = tree.nextInPreorderConst(current, root)) {
+        if (current.node_type != .element) continue;
+        if (matchRelativeCandidate(anchor, relative.kind, relative.selector, current)) return true;
     }
     return false;
+}
+
+fn nextElementSibling(node: *const Node) ?*const Node {
+    var sibling = node.next_sibling;
+    while (sibling) |current| : (sibling = current.next_sibling) {
+        if (current.node_type == .element) return current;
+    }
+    return null;
 }
 
 fn matchRelativeCandidate(anchor: *const Node, leading: CombinatorKind, selector: *const Selector, candidate: *const Node) bool {
@@ -355,7 +535,9 @@ fn matchRelativeCandidate(anchor: *const Node, leading: CombinatorKind, selector
                 },
             };
         },
-        else => matchesLeadingRelation(anchor, candidate, leading) and matchNode(selector, candidate),
+        // `matchNode` is a tag/class/attribute test on this one node, while
+        // `matchesLeadingRelation` may walk every ancestor. Cheap test first.
+        else => matchNode(selector, candidate) and matchesLeadingRelation(anchor, candidate, leading),
     };
 }
 
@@ -394,10 +576,9 @@ fn nodeContainsText(node: *const Node, text: []const u8) bool {
     if (node.node_type == .text) {
         return std.mem.indexOf(u8, node.data, text) != null;
     }
-    var c = node.first_child;
-    while (c) |child| {
-        if (nodeContainsText(child, text)) return true;
-        c = child.next_sibling;
+    var cur = tree.nextInPreorderConst(node, node);
+    while (cur) |current| : (cur = tree.nextInPreorderConst(current, node)) {
+        if (current.node_type == .text and std.mem.indexOf(u8, current.data, text) != null) return true;
     }
     return false;
 }
@@ -494,4 +675,166 @@ test "matchAll collects descendants" {
     const m = Matcher.init(alloc, &sel);
     const results = try m.matchAll(&root);
     try std.testing.expect(results.len == 2);
+}
+
+// ---------------------------------------------------------------------------
+// Differential tests for the memoized sibling positions.
+//
+// `elementPosition` and `elementCount` cache across calls, so a bug in them
+// shows up only for particular visit orders. These tests compare every
+// positional pseudo-class against a straightforward rescanning implementation
+// over trees with mixed node types, checking every node in several orders.
+// ---------------------------------------------------------------------------
+
+/// Deliberately naive: rescans the sibling list on every call.
+fn referencePosition(node: *const Node, from_end: bool, of_type: ?[]const u8) ?i32 {
+    const parent = node.parent orelse return null;
+    var index: i32 = 0;
+    var child = if (from_end) parent.last_child else parent.first_child;
+    while (child) |current| : (child = if (from_end) current.prev_sibling else current.next_sibling) {
+        if (current.node_type != .element) continue;
+        if (of_type) |tag| {
+            if (!std.mem.eql(u8, current.data, tag)) continue;
+        }
+        index += 1;
+        if (current == node) return index;
+    }
+    return null;
+}
+
+const PositionCase = struct { from_end: bool, of_type: bool };
+
+fn checkPositionsAgainstReference(root: *const Node) !void {
+    const cases = [_]PositionCase{
+        .{ .from_end = false, .of_type = false },
+        .{ .from_end = true, .of_type = false },
+        .{ .from_end = false, .of_type = true },
+        .{ .from_end = true, .of_type = true },
+    };
+
+    for (cases) |case| {
+        var cur: ?*const Node = root;
+        while (cur) |node| : (cur = tree.nextInPreorderConst(node, root)) {
+            if (node.node_type != .element) continue;
+            const of_type: ?[]const u8 = if (case.of_type) node.data else null;
+            const want = referencePosition(node, case.from_end, of_type);
+            const got = positionFor(node, case.from_end, of_type);
+            try std.testing.expectEqual(want, got);
+        }
+    }
+}
+
+fn buildMixedTree(gpa: std.mem.Allocator, seed: u64) !*Node {
+    // Element tags repeat so `of_type` counting has something to skip over,
+    // and text/comment nodes are interleaved so they must not be counted.
+    const tags = [_][]const u8{ "div", "p", "span", "div", "li" };
+    var state = seed | 1;
+    const rand = struct {
+        fn next(x: *u64) u64 {
+            x.* ^= x.* << 13;
+            x.* ^= x.* >> 7;
+            x.* ^= x.* << 17;
+            return x.*;
+        }
+    };
+
+    const root = try gpa.create(Node);
+    root.* = .{ .node_type = .element, .data = "root" };
+
+    var parents: std.ArrayList(*Node) = .empty;
+    defer parents.deinit(gpa);
+    try parents.append(gpa, root);
+
+    var made: usize = 0;
+    while (made < 120) : (made += 1) {
+        const parent = parents.items[rand.next(&state) % parents.items.len];
+        const roll = rand.next(&state) % 10;
+        const node = try gpa.create(Node);
+        if (roll < 6) {
+            node.* = .{ .node_type = .element, .data = tags[rand.next(&state) % tags.len] };
+            tree.appendChild(parent, node);
+            if (parents.items.len < 12) try parents.append(gpa, node);
+        } else if (roll < 8) {
+            node.* = .{ .node_type = .text, .data = "t" };
+            tree.appendChild(parent, node);
+        } else {
+            node.* = .{ .node_type = .comment, .data = "c" };
+            tree.appendChild(parent, node);
+        }
+    }
+    return root;
+}
+
+test "memoized sibling positions match a rescanning reference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for (0..16) |seed| {
+        const root = try buildMixedTree(arena.allocator(), seed + 1);
+        try checkPositionsAgainstReference(root);
+    }
+}
+
+test "position memo is invalidated by structural changes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    const parent = try gpa.create(Node);
+    parent.* = .{ .node_type = .element, .data = "ul" };
+
+    var kids: [5]*Node = undefined;
+    for (&kids) |*slot| {
+        slot.* = try gpa.create(Node);
+        slot.*.* = .{ .node_type = .element, .data = "li" };
+        tree.appendChild(parent, slot.*);
+    }
+
+    // Warm the memo on the last child.
+    try std.testing.expectEqual(@as(?i32, 5), positionFor(kids[4], false, null));
+
+    // Insert at the front: every cached position is now wrong by one.
+    const inserted = try gpa.create(Node);
+    inserted.* = .{ .node_type = .element, .data = "li" };
+    tree.insertBefore(parent, inserted, kids[0]);
+
+    try std.testing.expectEqual(@as(?i32, 6), positionFor(kids[4], false, null));
+    try std.testing.expectEqual(@as(?i32, 1), positionFor(inserted, false, null));
+    try checkPositionsAgainstReference(parent);
+
+    // Removal invalidates too.
+    tree.removeChild(parent, inserted);
+    try std.testing.expectEqual(@as(?i32, 5), positionFor(kids[4], false, null));
+    try checkPositionsAgainstReference(parent);
+}
+
+test "positions are correct when siblings are visited out of order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    const parent = try gpa.create(Node);
+    parent.* = .{ .node_type = .element, .data = "ul" };
+
+    var kids: [8]*Node = undefined;
+    for (&kids, 0..) |*slot, i| {
+        slot.* = try gpa.create(Node);
+        slot.*.* = .{ .node_type = .element, .data = if (i % 2 == 0) "li" else "p" };
+        tree.appendChild(parent, slot.*);
+    }
+
+    // Backward, then a stride, then forward: none of these are the order the
+    // memo is optimized for, so each must fall back to a full count.
+    var i: usize = kids.len;
+    while (i > 0) {
+        i -= 1;
+        try std.testing.expectEqual(referencePosition(kids[i], false, null), positionFor(kids[i], false, null));
+    }
+    for ([_]usize{ 0, 3, 6, 1, 7, 2 }) |idx| {
+        try std.testing.expectEqual(referencePosition(kids[idx], true, null), positionFor(kids[idx], true, null));
+        try std.testing.expectEqual(
+            referencePosition(kids[idx], false, kids[idx].data),
+            positionFor(kids[idx], false, kids[idx].data),
+        );
+    }
 }

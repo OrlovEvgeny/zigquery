@@ -4,15 +4,22 @@
 //!
 //! ```zig
 //! const zq = @import("zigquery");
+//!
 //! var doc = try zq.Document.initFromSlice(allocator, html);
 //! defer doc.deinit();
-//! const links = try doc.find("a.active");
+//!
+//! // A Query owns everything the queries below allocate.
+//! var q = doc.query(allocator);
+//! defer q.deinit();
+//!
+//! const links = try q.find("a.active");
 //! for (links.nodes) |node| {
 //!     std.debug.print("href={s}\n", .{node.getAttr("href") orelse ""});
 //! }
 //! ```
 
 pub const Document = @import("document.zig").Document;
+pub const Query = @import("query.zig").Query;
 pub const Selection = @import("selection.zig").Selection;
 pub const outerHtml = @import("selection.zig").outerHtml;
 pub const nodeName = @import("selection.zig").nodeName;

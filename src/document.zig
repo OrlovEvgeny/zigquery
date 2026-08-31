@@ -4,8 +4,7 @@ const Node = @import("dom/node.zig").Node;
 const NodeType = @import("dom/node.zig").NodeType;
 const html_parser = @import("dom/parser.zig");
 const tree = @import("dom/tree.zig");
-const Selection = @import("selection.zig").Selection;
-const CompiledSelector = @import("css/compiled.zig").CompiledSelector;
+const Query = @import("query.zig").Query;
 
 pub const Document = struct {
     arena: std.heap.ArenaAllocator,
@@ -55,7 +54,7 @@ pub const Document = struct {
 
     /// Store a document URL in the document arena.
     pub fn setUrl(self: *Document, url: []const u8) !void {
-        self.url = try self.allocator().dupe(u8, url);
+        self.url = try self.domAllocator().dupe(u8, url);
     }
 
     /// Release all memory owned by this document.
@@ -63,28 +62,25 @@ pub const Document = struct {
         self.arena.deinit();
     }
 
-    /// Root selection spanning the document's root node.
-    pub fn select(self: *Document) !Selection {
-        return Selection.initSingle(self.root_node, self);
+    /// Open a query scope over this document.
+    ///
+    /// Query results live in the returned `Query`, not in the document, so
+    /// releasing the query releases them. See `Query` for the rationale.
+    ///
+    ///     var q = doc.query(gpa);
+    ///     defer q.deinit();
+    ///     const links = try q.find("a.link");
+    ///
+    /// The document must outlive the query.
+    pub fn query(self: *Document, backing: Allocator) Query {
+        return Query.init(self, backing);
     }
 
-    /// Convenience: parse a CSS selector and return matching elements.
-    pub fn find(self: *Document, selector: []const u8) !Selection {
-        return (try self.select()).find(selector);
-    }
-
-    /// Convenience: find using a pre-compiled matcher.
-    pub fn findMatcher(self: *Document, m: @import("css/matcher.zig").Matcher) !Selection {
-        return (try self.select()).findMatcher(m);
-    }
-
-    /// Convenience: find using a reusable compiled selector.
-    pub fn findCompiled(self: *Document, compiled: *const CompiledSelector) !Selection {
-        return (try self.select()).findCompiled(compiled);
-    }
-
-    /// Arena allocator for this document. Selections allocate node slices here.
-    pub fn allocator(self: *Document) Allocator {
+    /// Allocator for the DOM itself.
+    ///
+    /// Reserved for content that becomes part of the document and must live as
+    /// long as it does. Query results belong in `Query.scratch` instead.
+    pub fn domAllocator(self: *Document) Allocator {
         return self.arena.allocator();
     }
 };
@@ -95,9 +91,49 @@ test "Document initFromSlice" {
     try std.testing.expect(doc.root_node.node_type == .document);
 }
 
-test "Document find" {
+test "Document query" {
     var doc = try Document.initFromSlice(std.testing.allocator, "<div><p>Hello</p><p>World</p></div>");
     defer doc.deinit();
-    const sel = try doc.find("p");
+
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+
+    const sel = try q.find("p");
     try std.testing.expect(sel.len() == 2);
+}
+
+test "query allocations do not touch the document arena" {
+    var doc = try Document.initFromSlice(std.testing.allocator, "<div><p>a</p><p>b</p></div>");
+    defer doc.deinit();
+
+    const before = doc.arena.queryCapacity();
+
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    for (0..500) |_| {
+        const sel = try q.find("p");
+        std.mem.doNotOptimizeAway(sel.len());
+    }
+
+    try std.testing.expectEqual(before, doc.arena.queryCapacity());
+}
+
+test "query reset reclaims without freeing the document" {
+    var doc = try Document.initFromSlice(std.testing.allocator, "<div><p>a</p><p>b</p></div>");
+    defer doc.deinit();
+
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+
+    for (0..200) |_| {
+        const sel = try q.find("p");
+        std.mem.doNotOptimizeAway(sel.len());
+    }
+    const grown = q.bytesUsed();
+    try std.testing.expect(grown > 0);
+
+    q.reset();
+    // Capacity is retained for reuse, and the document is untouched.
+    try std.testing.expectEqual(@as(usize, 2), (try q.find("p")).len());
+    try std.testing.expect(q.bytesUsed() <= grown);
 }

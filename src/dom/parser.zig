@@ -69,6 +69,22 @@ const auto_close_map = std.StaticStringMap([]const []const u8).initComptime(.{
     .{ "rp", &.{ "rt", "rp" } },
 });
 
+/// The tags that appear as *targets* in `auto_close_map`, i.e. the only tags a
+/// later start tag can implicitly close. The parser keeps a live count of how
+/// many of each are open so `autoClose` can answer "none" without walking the
+/// open-element stack.
+const Closer = enum(u8) { p, dd, dt, li, option, optgroup, tbody, tfoot, tr, td, th, rt, rp };
+
+const closer_ids = std.StaticStringMap(Closer).initComptime(.{
+    .{ "p", .p },           .{ "dd", .dd },
+    .{ "dt", .dt },         .{ "li", .li },
+    .{ "option", .option }, .{ "optgroup", .optgroup },
+    .{ "tbody", .tbody },   .{ "tfoot", .tfoot },
+    .{ "tr", .tr },         .{ "td", .td },
+    .{ "th", .th },         .{ "rt", .rt },
+    .{ "rp", .rp },
+});
+
 // Formatting elements for adoption agency.
 const formatting_elements = std.StaticStringMap(void).initComptime(.{
     .{ "a", {} },     .{ "b", {} },      .{ "big", {} },
@@ -142,6 +158,8 @@ const Parser = struct {
     pos: usize,
     doc: *Node,
     open_elements: std.ArrayList(*Node),
+    /// How many elements of each closable tag are currently open.
+    open_closer_counts: [@typeInfo(Closer).@"enum".fields.len]u32 = @splat(0),
     fragment_context: ?*const Node,
     head_inserted: bool,
     body_inserted: bool,
@@ -300,7 +318,7 @@ const Parser = struct {
 
         const is_void = void_elements.has(tag_name) or self_closing;
         if (!is_void) {
-            try self.open_elements.append(self.allocator, node);
+            try self.pushOpen(node);
 
             // Raw text elements: slurp content until closing tag.
             if (raw_text_elements.has(tag_name) or rcdata_elements.has(tag_name)) {
@@ -329,7 +347,7 @@ const Parser = struct {
         while (i > 0) {
             i -= 1;
             if (std.mem.eql(u8, self.open_elements.items[i].data, tag_name)) {
-                self.open_elements.items.len = i;
+                self.popOpenTo(i);
                 return;
             }
         }
@@ -519,6 +537,20 @@ const Parser = struct {
     }
 
     fn autoClose(self: *Parser, closers: []const []const u8) void {
+        // Nothing to close unless one of these tags is actually open. Without
+        // this check the scan below runs to the nearest scope boundary on every
+        // start tag -- and in a plain nested document the nearest boundary is
+        // <html>, which makes parsing quadratic in nesting depth.
+        var any_open = false;
+        for (closers) |closer| {
+            const id = closer_ids.get(closer) orelse continue;
+            if (self.open_closer_counts[@intFromEnum(id)] > 0) {
+                any_open = true;
+                break;
+            }
+        }
+        if (!any_open) return;
+
         // Search backward through the stack for the nearest element that
         // should be auto-closed. Don't cross scope boundaries (html, table, etc.).
         var i = self.open_elements.items.len;
@@ -528,7 +560,7 @@ const Parser = struct {
             for (closers) |closer| {
                 if (std.mem.eql(u8, el.data, closer)) {
                     // Pop everything from this element up.
-                    self.open_elements.items.len = i;
+                    self.popOpenTo(i);
                     return;
                 }
             }
@@ -548,7 +580,7 @@ const Parser = struct {
             if (is_html) return; // about to be added by caller
             const html_node = try self.createNode(.element, "html");
             tree.appendChild(self.doc, html_node);
-            try self.open_elements.append(self.allocator, html_node);
+            try self.pushOpen(html_node);
         }
 
         const in_head = is_head or std.mem.eql(u8, tag_name, "meta") or
@@ -563,28 +595,46 @@ const Parser = struct {
             if (self.head_node == null) {
                 const head = try self.createNode(.element, "head");
                 tree.appendChild(self.open_elements.items[0], head);
-                try self.open_elements.append(self.allocator, head);
+                try self.pushOpen(head);
                 self.head_node = head;
                 self.head_inserted = true;
             } else if (self.open_elements.items.len == 1) {
-                try self.open_elements.append(self.allocator, self.head_node.?);
+                try self.pushOpen(self.head_node.?);
             }
             return;
         }
 
         if (self.body_node == null) {
             if (self.open_elements.items.len > 1 and self.open_elements.items[1] == self.head_node) {
-                self.open_elements.items.len = 1;
+                self.popOpenTo(1);
             }
             if (is_body) return;
             const body = try self.createNode(.element, "body");
             tree.appendChild(self.open_elements.items[0], body);
-            try self.open_elements.append(self.allocator, body);
+            try self.pushOpen(body);
             self.body_node = body;
             self.body_inserted = true;
         } else if (!is_html and !is_head and self.open_elements.items.len == 1) {
-            try self.open_elements.append(self.allocator, self.body_node.?);
+            try self.pushOpen(self.body_node.?);
         }
+    }
+
+    /// Push an element onto the open-element stack, keeping the closable-tag
+    /// counts in step.
+    fn pushOpen(self: *Parser, node: *Node) HtmlParseError!void {
+        self.open_elements.append(self.allocator, node) catch return HtmlParseError.OutOfMemory;
+        if (closer_ids.get(node.data)) |id| self.open_closer_counts[@intFromEnum(id)] += 1;
+    }
+
+    /// Truncate the open-element stack to `len`, keeping the counts in step.
+    fn popOpenTo(self: *Parser, len: usize) void {
+        var i = self.open_elements.items.len;
+        while (i > len) {
+            i -= 1;
+            const node = self.open_elements.items[i];
+            if (closer_ids.get(node.data)) |id| self.open_closer_counts[@intFromEnum(id)] -= 1;
+        }
+        self.open_elements.items.len = len;
     }
 
     fn currentNode(self: *Parser) *Node {

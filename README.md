@@ -28,16 +28,20 @@ pub fn main() !void {
     );
     defer doc.deinit();
 
+    // A Query owns everything the queries below allocate.
+    var q = doc.query(allocator);
+    defer q.deinit();
+
     // Find all paragraphs.
-    const paragraphs = try doc.find("p");
+    const paragraphs = try q.find("p");
     std.debug.print("Found {} paragraphs\n", .{paragraphs.len()});
 
     // Get text content.
-    const title = try (try doc.find("h1")).text();
+    const title = try (try q.find("h1")).text();
     std.debug.print("Title: {s}\n", .{title});
 
     // Read attributes.
-    const link = try doc.find("a.active");
+    const link = try q.find("a.active");
     const href = link.attr("href") orelse "";
     std.debug.print("Link: {s}\n", .{href});
 }
@@ -96,25 +100,56 @@ Supported selector syntax:
 
 ## API overview
 
-### Document
+### Document and Query
+
+A `Document` owns the parsed DOM. A `Query` owns everything a query produces:
+node slices, chained `Selection` states, parsed selectors, and the strings
+returned by `html()`, `text()` and `outerHtml()`.
 
 ```zig
-// Parse HTML into a document. All allocations use an internal arena.
+// Parse HTML into a document. The DOM lives in the document's arena.
 var doc = try zq.Document.initFromSlice(allocator, html);
 defer doc.deinit();
 
-// Query from the document root.
-const sel = try doc.find("div.content");
+// Open a query scope. Results live here, not in the document.
+var q = doc.query(allocator);
+defer q.deinit();
+
+const sel = try q.find("div.content");
 
 // Deep-clone the entire document.
 var copy = try doc.clone(allocator);
 defer copy.deinit();
 ```
 
+Keeping the two apart is what makes a long-lived document practical. When you
+run many queries against one document -- a scraper looping over pages, or a
+server handling requests -- reclaim between rounds:
+
+```zig
+var q = doc.query(allocator);
+defer q.deinit();
+
+for (jobs) |job| {
+    const rows = try q.find(job.selector);
+    try handle(rows);
+    q.reset();   // releases this round's results, keeps the capacity
+}
+```
+
+`q.reset()` and `q.deinit()` invalidate every `Selection` and every string
+obtained through that query. Anything you need to keep, copy out first.
+
+Changes you make to the DOM are not query data and are unaffected: attributes,
+inserted nodes and parsed fragments belong to the document and outlive the
+query that created them.
+
+All the examples below assume a `q` in scope, as above.
+
 ### Selection — Traversal
 
 ```zig
-const sel = try doc.find("div");
+const sel = try q.find("div");
 
 // Descendants matching a selector.
 const links = try sel.find("a");
@@ -139,7 +174,7 @@ const prev_all = try sel.prevAll();
 ### Selection — Filtering
 
 ```zig
-const items = try doc.find("li");
+const items = try q.find("li");
 
 const active = try items.filter(".active");
 const inactive = try items.not(".active");
@@ -158,7 +193,7 @@ const is_active = try items.is(".active");
 ### Selection — Properties
 
 ```zig
-const el = try doc.find("a.nav");
+const el = try q.find("a.nav");
 
 // Attributes.
 const href = el.attr("href");
@@ -182,14 +217,14 @@ const name = zq.nodeName(el);
 ### Selection — Manipulation
 
 ```zig
-const div = try doc.find("div");
+const div = try q.find("div");
 
 // Insert content.
 try div.appendHtml("<p>appended</p>");
 try div.prependHtml("<p>prepended</p>");
 
 // Insert around selection.
-const p = try doc.find("p");
+const p = try q.find("p");
 try p.afterHtml("<hr/>");
 try p.beforeHtml("<!-- marker -->");
 
@@ -210,7 +245,7 @@ try div.unwrap();
 ### Selection — Iteration
 
 ```zig
-const rows = try doc.find("tr");
+const rows = try q.find("tr");
 
 // Iterator (idiomatic Zig).
 var it = rows.iterator();
@@ -231,8 +266,8 @@ rows.each(struct {
 ### Selection — Set operations
 
 ```zig
-const a = try doc.find(".foo");
-const b = try doc.find(".bar");
+const a = try q.find(".foo");
+const b = try q.find(".bar");
 
 const combined = try a.add(".bar");
 const merged = try a.addSelection(b);
@@ -248,22 +283,56 @@ Compile a selector once when it is reused across queries or documents:
 var active_links = try zq.CompiledSelector.init(allocator, "a.active");
 defer active_links.deinit();
 
-const links = try doc.findCompiled(&active_links);
+const links = try q.findCompiled(&active_links);
 const matches = links.isCompiled(&active_links);
 ```
 
 ## Ownership and errors
 
-`Document.initFromSlice`, `Document.initFromNode`, `Document.clone`, parsed fragments,
-attributes, and inserted nodes own their data through the document arena. Input buffers
-and source documents may be released after these operations complete. Use
-`Document.initBorrowedNode` only when the source tree is guaranteed to outlive the
-document.
+Two arenas, with a clear division:
 
-Operations that allocate return an error union. In v0.2 this includes traversal methods
-such as `children`, positional methods such as `first`, attribute/class updates, and DOM
-mutations. Mutations parse or clone all required data before changing the tree, so an
-allocation failure does not leave a partially updated selection.
+| Lives in the **document** arena | Lives in the **query** arena |
+|---|---|
+| Parsed nodes and their data | `Selection.nodes` slices |
+| Attribute keys and values you set | Chained selection state (`end()`, `addBack()`) |
+| Nodes from `appendHtml`, `setHtml`, `wrapHtml`, … | Parsed selector ASTs |
+| Clones from `cloneSel` | Strings from `html()`, `text()`, `outerHtml()` |
+| Released by `doc.deinit()` | Released by `q.deinit()` or `q.reset()` |
+
+Input buffers and source documents may be released once parsing completes. Use
+`Document.initBorrowedNode` only when the source tree is guaranteed to outlive
+the document. A `Query` borrows its `Document`, so the document must outlive it.
+
+Operations that allocate return an error union: traversal methods such as
+`children`, positional methods such as `first`, attribute and class updates, and
+DOM mutations. Mutations parse or clone all required data before changing the
+tree, so an allocation failure does not leave a partially updated selection.
+
+## v0.3 migration
+
+Queries now run through a `Query` rather than the `Document`:
+
+```zig
+// v0.2
+const links = try doc.find("a.active");
+
+// v0.3
+var q = doc.query(allocator);
+defer q.deinit();
+const links = try q.find("a.active");
+```
+
+- `Document.find`, `findMatcher`, `findCompiled` and `select` move to `Query`
+  (`select` is now `Query.root`).
+- `Document.allocator` is renamed `Document.domAllocator` and is reserved for
+  content that joins the DOM.
+- `Selection.document` is now the method `Selection.document()`; the struct
+  field is `Selection.q`.
+- Strings from `html()`, `text()` and `outerHtml()` belong to the query and do
+  not survive `q.deinit()` or `q.reset()`. Duplicate anything you need to keep.
+
+Previously every query allocated into the document's arena and nothing was ever
+released, so repeated queries against one document grew without bound.
 
 ## v0.2 migration
 
@@ -284,6 +353,19 @@ full named entity table remain roadmap items. See [ROADMAP.md](ROADMAP.md).
 ```sh
 zig build test
 ```
+
+## Benchmarks
+
+```sh
+zig build bench                    # the standard suite, always ReleaseFast
+zig build bench -- --scaling       # empirical complexity at 1x / 2x / 4x input
+zig build bench -- --filter find/  # a subset
+zig build bench -- --corpus <dir>  # also run against local .html files
+```
+
+Corpora are generated deterministically, so results are comparable across
+machines. `--scaling` reports an exponent per workload: about 1.0 for linear,
+2.0 for quadratic. `bench/baseline.json` records a reference run.
 
 Inspired by Go's [goquery](https://github.com/PuerkitoBio/goquery) and, by extension, jQuery
 

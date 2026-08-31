@@ -43,7 +43,7 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag: $RELEASE_TAG" >&2; exit 1; }
           ZON_VERSION=$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
           test "${RELEASE_TAG#v}" = "$ZON_VERSION"
-          zig fmt --check src/ test/
+          zig fmt --check src/ test/ bench/
           zig build
           zig build test
 

@@ -108,10 +108,12 @@ test "relative has selectors" {
         "<section><p>child</p></section><section><div><p>nested</p></div></section><dt id=first></dt><dt></dt>",
     );
     defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
 
-    try std.testing.expect((try doc.find("section:has(> p)")).len() == 1);
-    try std.testing.expect((try doc.find("section:has(p)")).len() == 2);
-    try std.testing.expect((try doc.find("dt:has(+ dt)")).len() == 1);
+    try std.testing.expect((try q.find("section:has(> p)")).len() == 1);
+    try std.testing.expect((try q.find("section:has(p)")).len() == 2);
+    try std.testing.expect((try q.find("dt:has(+ dt)")).len() == 1);
 }
 
 test "relative has anchors complex selector chains" {
@@ -121,32 +123,91 @@ test "relative has anchors complex selector chains" {
             "<h1></h1><section><a></a></section>",
     );
     defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
 
-    try std.testing.expect((try doc.find("div:has(> p > span)")).len() == 1);
-    try std.testing.expect((try doc.find("h1:has(+ section > a)")).len() == 1);
-    try std.testing.expect((try doc.find("#b:has(> p > span)")).len() == 0);
+    try std.testing.expect((try q.find("div:has(> p > span)")).len() == 1);
+    try std.testing.expect((try q.find("h1:has(+ section > a)")).len() == 1);
+    try std.testing.expect((try q.find("#b:has(> p > span)")).len() == 0);
 }
 
 test "selector lists in logical pseudo classes" {
     var doc = try zq.Document.initFromSlice(std.testing.allocator, "<h1>A</h1><h2>B</h2><p>C</p>");
     defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
 
-    try std.testing.expect((try doc.find(":is(h1, h2)")).len() == 2);
-    try std.testing.expect((try doc.find("*:not(h1, h2)")).len() >= 1);
+    try std.testing.expect((try q.find(":is(h1, h2)")).len() == 2);
+    try std.testing.expect((try q.find("*:not(h1, h2)")).len() >= 1);
 }
 
 test "HTML selector names are ASCII case insensitive" {
     var doc = try zq.Document.initFromSlice(std.testing.allocator, "<DIV DATA-X=value>ok</DIV>");
     defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
 
-    try std.testing.expect((try doc.find("DIV[DATA-X=value]")).len() == 1);
+    try std.testing.expect((try q.find("DIV[DATA-X=value]")).len() == 1);
 }
 
 test "universal selector only matches elements" {
     var doc = try zq.Document.initFromSlice(std.testing.allocator, "<div>text<span></span></div>");
     defer doc.deinit();
-    const contents = try (try doc.find("div")).contents();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+    const contents = try (try q.find("div")).contents();
     const elements = try contents.filter("*");
     try std.testing.expect(elements.len() == 1);
     try std.testing.expectEqualStrings("span", elements.nodes[0].data);
+}
+
+test ":has() scopes candidates correctly" {
+    const html =
+        \\<div id="outer">
+        \\  <h1>title</h1>
+        \\  <p class="lead">intro</p>
+        \\  <section><a href="/x">link</a></section>
+        \\  <span class="tail">end</span>
+        \\</div>
+        \\<div id="empty"><b>no anchors here</b></div>
+    ;
+    var doc = try zq.Document.initFromSlice(std.testing.allocator, html);
+    defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+
+    // The match is a later sibling, reached through a sibling combinator from
+    // the anchor's immediate next sibling.
+    try std.testing.expectEqual(@as(usize, 1), (try q.find("h1:has(+ p ~ span)")).len());
+    try std.testing.expectEqual(@as(usize, 1), (try q.find("h1:has(+ p ~ section)")).len());
+    // `+ section` is wrong: section is not h1's *immediate* next sibling.
+    try std.testing.expectEqual(@as(usize, 0), (try q.find("h1:has(+ section)")).len());
+    try std.testing.expectEqual(@as(usize, 1), (try q.find("h1:has(~ section)")).len());
+
+    // A descendant relation stays inside the anchor's own subtree: #empty must
+    // not match on the <a> that lives inside #outer.
+    try std.testing.expectEqual(@as(usize, 1), (try q.find("div:has(a)")).len());
+    try std.testing.expectEqual(@as(usize, 0), (try q.find("#empty:has(a)")).len());
+    try std.testing.expectEqual(@as(usize, 1), (try q.find("#outer:has(a)")).len());
+
+    // A child relation does not reach grandchildren.
+    try std.testing.expectEqual(@as(usize, 0), (try q.find("#outer:has(> a)")).len());
+    try std.testing.expectEqual(@as(usize, 1), (try q.find("section:has(> a)")).len());
+}
+
+test ":has() on a deeply nested document does not recurse" {
+    const gpa = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    for (0..50_000) |_| try buf.appendSlice(gpa, "<div>");
+    try buf.appendSlice(gpa, "<a href=\"/deep\">x</a>");
+    for (0..50_000) |_| try buf.appendSlice(gpa, "</div>");
+
+    var doc = try zq.Document.initFromSlice(gpa, buf.items);
+    defer doc.deinit();
+    var q = doc.query(std.testing.allocator);
+    defer q.deinit();
+
+    // Only the innermost div has an <a> as a direct child.
+    try std.testing.expectEqual(@as(usize, 1), (try q.find("div:has(> a)")).len());
 }
